@@ -2,6 +2,10 @@
 name = "ferromon"
 version = "0.1.0"
 edition = "2021"
+description = "Lightweight interactive Rust TUI for CPU/memory/disk monitoring"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ChrisJohnson89/Ferromon"
 
 [dependencies]
 crossterm = "0.27"
