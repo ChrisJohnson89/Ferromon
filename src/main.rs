@@ -2,7 +2,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -37,7 +39,14 @@ fn main() -> io::Result<()> {
 
     let mut app = AppState::default();
 
-    let res = run_app(&mut terminal, &mut system, &mut disks, &mut app, tick_rate, &mut last_tick);
+    let res = run_app(
+        &mut terminal,
+        &mut system,
+        &mut disks,
+        &mut app,
+        tick_rate,
+        &mut last_tick,
+    );
 
     // Always restore terminal
     disable_raw_mode()?;
@@ -66,6 +75,7 @@ fn run_app(
         }
 
         let cpu_usage = system.global_cpu_info().cpu_usage();
+        // sysinfo reports memory in BYTES (not KiB).
         let total_memory = system.total_memory();
         let used_memory = system.used_memory();
         let memory_percent = percent(used_memory, total_memory);
@@ -77,12 +87,7 @@ fn run_app(
                 let avail = d.available_space();
                 let used = total.saturating_sub(avail);
                 let pct = percent(used, total);
-                (
-                    format!("{}", d.mount_point().display()),
-                    used,
-                    total,
-                    pct,
-                )
+                (format!("{}", d.mount_point().display()), used, total, pct)
             }
             None => ("(no disks)".to_string(), 0, 0, 0.0),
         };
@@ -103,22 +108,30 @@ fn run_app(
             let header = Paragraph::new(Line::from(vec![
                 Span::styled(
                     "Ferromon",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  —  "),
                 Span::styled(
                     "q",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(": quit  "),
                 Span::styled(
                     "r",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(": refresh  "),
                 Span::styled(
                     "h",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(": help"),
             ]));
@@ -157,8 +170,8 @@ fn run_app(
                     Span::styled(
                         format!(
                             "{} / {}",
-                            format_bytes_kib(used_memory),
-                            format_bytes_kib(total_memory)
+                            format_bytes(used_memory),
+                            format_bytes(total_memory)
                         ),
                         Style::default().fg(Color::White),
                     ),
@@ -202,7 +215,9 @@ fn run_app(
                 ]),
             ];
             frame.render_widget(
-                Paragraph::new(disk_lines).block(disk_block).alignment(Alignment::Left),
+                Paragraph::new(disk_lines)
+                    .block(disk_block)
+                    .alignment(Alignment::Left),
                 panels[2],
             );
 
@@ -221,7 +236,9 @@ fn run_app(
                 let footer = Paragraph::new(Line::from(vec![
                     Span::styled(
                         "Tip: ",
-                        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw("press "),
                     Span::styled("h", Style::default().fg(Color::Yellow)),
@@ -283,24 +300,6 @@ fn pick_primary_disk(disks: &Disks) -> Option<&sysinfo::Disk> {
         .iter()
         .find(|d| matches!(d.kind(), DiskKind::HDD | DiskKind::SSD))
         .or_else(|| disks.iter().next())
-}
-
-fn format_bytes_kib(kib: u64) -> String {
-    // sysinfo memory uses KiB
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-
-    let bytes = kib as f64 * 1024.0;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes / KIB)
-    } else {
-        format!("{bytes:.0} B")
-    }
 }
 
 fn format_bytes(bytes: u64) -> String {
