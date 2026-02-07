@@ -1,6 +1,6 @@
 [package]
 name = "ferromon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight interactive Rust TUI for CPU/memory/disk monitoring"
 license = "MIT"
@@ -15,3 +15,4 @@ path = "src/main.rs"
 crossterm = "0.27"
 ratatui = "0.27"
 sysinfo = "0.30"
+walkdir = "2.5"
