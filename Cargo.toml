@@ -7,6 +7,10 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/ChrisJohnson89/Ferromon"
 
+[[bin]]
+name = "ferro"
+path = "src/main.rs"
+
 [dependencies]
 crossterm = "0.27"
 ratatui = "0.27"

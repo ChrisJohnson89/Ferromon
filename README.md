@@ -13,7 +13,17 @@ A lightweight, interactive **Rust TUI** for quick host health checks (CPU / memo
 - `r` — refresh now
 - `h` — toggle help
 
-## Run
+## Install (Rust required)
+```bash
+cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked
+```
+
+Then run:
+```bash
+ferro
+```
+
+## Dev run
 ```bash
 cargo run
 ```
