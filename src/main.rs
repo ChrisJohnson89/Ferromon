@@ -212,16 +212,7 @@ fn run_app(
                             *last_tick = Instant::now();
                         }
 
-                        // Processes screen controls
-                        KeyCode::Tab => {
-                            if matches!(app.screen, Screen::Processes) {
-                                app.proc_sort = match app.proc_sort {
-                                    ProcSort::Cpu => ProcSort::Mem,
-                                    ProcSort::Mem => ProcSort::Cpu,
-                                };
-                                app.proc_scroll = 0;
-                            }
-                        }
+                        // Processes + DiskDive share Tab for mode/target.
                         KeyCode::Up => {
                             if matches!(app.screen, Screen::Processes) {
                                 app.proc_scroll = app.proc_scroll.saturating_sub(1);
@@ -238,7 +229,7 @@ fn run_app(
                         }
 
                         // Disk dive controls
-                        KeyCode::Char('t') => {
+                        KeyCode::Tab => {
                             if matches!(app.screen, Screen::DiskDive) {
                                 app.disk_target = match app.disk_target {
                                     DiskTarget::Var => DiskTarget::Home,
@@ -246,6 +237,12 @@ fn run_app(
                                     DiskTarget::Root => DiskTarget::Var,
                                 };
                                 app.disk_scroll = 0;
+                            } else if matches!(app.screen, Screen::Processes) {
+                                app.proc_sort = match app.proc_sort {
+                                    ProcSort::Cpu => ProcSort::Mem,
+                                    ProcSort::Mem => ProcSort::Cpu,
+                                };
+                                app.proc_scroll = 0;
                             }
                         }
                         KeyCode::Char('s') => {
@@ -313,8 +310,8 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
 fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
         Screen::Dashboard => ("Dashboard", "p: processes  d: disk"),
-        Screen::Processes => ("Processes", "Tab: CPU/Mem  Esc: back"),
-        Screen::DiskDive => ("Disk dive", "s: scan  t: target  Esc: back"),
+        Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
+        Screen::DiskDive => ("Disk dive", "s: scan  Tab: target  Esc: back"),
     };
 
     Paragraph::new(Line::from(vec![
@@ -345,7 +342,9 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
     let tip = match app.screen {
         Screen::Dashboard => "Tip: press p for processes, d for disk dive",
         Screen::Processes => "Tip: Tab toggles sort (CPU/Mem). Use ↑/↓ to scroll",
-        Screen::DiskDive => "Tip: press s to scan (on-demand). Results are cached",
+        Screen::DiskDive => {
+            "Tip: press s to scan (on-demand). Tab changes target. Results are cached"
+        }
     };
 
     Paragraph::new(Line::from(vec![
@@ -383,7 +382,7 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
         Screen::DiskDive => {
             lines.push(Line::from("Disk dive:"));
             lines.push(Line::from("  s — start scan"));
-            lines.push(Line::from("  t — toggle target (/var ↔ home ↔ /)"));
+            lines.push(Line::from("  Tab — change target (/var ↔ home ↔ /)"));
             lines.push(Line::from("  ↑/↓ — scroll"));
         }
     }
@@ -459,9 +458,10 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
             Span::styled("Used: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!(
-                    "{} / {}",
+                    "{} / {} (free {})",
                     format_bytes(vm.disk_used),
-                    format_bytes(vm.disk_total)
+                    format_bytes(vm.disk_total),
+                    format_bytes(vm.disk_total.saturating_sub(vm.disk_used))
                 ),
                 Style::default().fg(Color::White),
             ),
@@ -596,9 +596,9 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
     let state = app.disk_scan.inner.lock().unwrap();
 
     let title = if state.running {
-        format!("Disk dive — scanning {}", target.display())
+        format!("Disk dive  (target: {})  •  scanning", target.display())
     } else {
-        format!("Disk dive — {}", target.display())
+        format!("Disk dive  (target: {})", target.display())
     };
 
     let block = Block::default()
@@ -606,9 +606,15 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 
+    frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
 
-    // Top status line
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(inner);
+
+    // Status line(s)
     let status_line = if let Some(err) = &state.error {
         Line::from(vec![
             Span::styled("Error: ", Style::default().fg(Color::Red)),
@@ -623,60 +629,67 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
         Line::from(vec![
             Span::styled("Press ", Style::default().fg(Color::Gray)),
             Span::styled("s", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                " to scan (on-demand). Press t to change target.",
-                Style::default().fg(Color::Gray),
-            ),
+            Span::styled(" to scan (on-demand) · ", Style::default().fg(Color::Gray)),
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::styled(" to change target", Style::default().fg(Color::Gray)),
         ])
     } else {
         Line::from(vec![
             Span::styled("Cached results. ", Style::default().fg(Color::Gray)),
             Span::styled("s", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                " to rescan · t to change target · ↑/↓ to scroll",
-                Style::default().fg(Color::Gray),
-            ),
+            Span::styled(" rescan · ", Style::default().fg(Color::Gray)),
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::styled(" target · ", Style::default().fg(Color::Gray)),
+            Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
+            Span::styled(" scroll", Style::default().fg(Color::Gray)),
         ])
     };
 
-    let status = Paragraph::new(status_line).block(block.clone());
-    frame.render_widget(status, area);
+    let status = Paragraph::new(vec![status_line]).alignment(Alignment::Left);
+    frame.render_widget(status, rows[0]);
 
     // Results table
     let mut results = state.results.clone();
     drop(state);
-
     results.sort_by_key(|(_, bytes)| Reverse(*bytes));
 
-    let table_area = Rect {
-        x: inner.x,
-        y: inner.y + 1,
-        width: inner.width,
-        height: inner.height.saturating_sub(2),
-    };
-
-    let visible = table_area.height as usize;
+    let visible = rows[1].height.saturating_sub(2) as usize; // table header + borders
     let offset = (app.disk_scroll as usize).min(results.len().saturating_sub(1));
     let slice = &results[offset..results.len().min(offset + visible.max(1))];
 
-    let rows = slice.iter().map(|(dir, bytes)| {
+    let table_rows = slice.iter().enumerate().map(|(i, (dir, bytes))| {
+        let zebra = if (offset + i) % 2 == 0 {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
         Row::new(vec![
             Cell::from(dir.clone()),
             Cell::from(format_bytes(*bytes)),
         ])
+        .style(zebra)
     });
 
-    let table = Table::new(rows, [Constraint::Percentage(70), Constraint::Length(14)])
-        .header(
-            Row::new(vec!["Directory", "Size"]).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .block(Block::default().borders(Borders::NONE));
+    let table = Table::new(
+        table_rows,
+        [Constraint::Percentage(72), Constraint::Length(14)],
+    )
+    .header(
+        Row::new(vec!["Directory", "Size"]).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
+        Block::default()
+            .title("Top dirs")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green)),
+    );
 
-    frame.render_widget(table, table_area);
+    frame.render_widget(table, rows[1]);
 }
 
 fn start_disk_scan(app: &mut AppState) {
