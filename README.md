@@ -13,9 +13,14 @@ A lightweight, interactive **Rust TUI** for quick host health checks (CPU / memo
 ## Controls
 - `q` — quit
 - `?` — help
+- `Esc` — back to dashboard
 - `p` — processes view
 - `d` — disk dive
 - `r` — refresh now
+
+### Screen-specific
+- Processes: `Tab` toggles sort (CPU ↔ Mem)
+- Disk dive: `Tab` changes scan target (/var ↔ home ↔ /), `s` starts scan
 
 ## Install (Rust required)
 ```bash
