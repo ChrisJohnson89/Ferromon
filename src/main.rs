@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,9 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Wrap,
+};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{DiskKind, Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
@@ -57,10 +60,23 @@ impl Default for DiskTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardMode {
+    Visual,
+    Triage,
+}
+
+impl Default for DashboardMode {
+    fn default() -> Self {
+        DashboardMode::Visual
+    }
+}
+
 #[derive(Default)]
 struct AppState {
     screen: Screen,
     show_help: bool,
+    dashboard_mode: DashboardMode,
 
     proc_sort: ProcSort,
     proc_scroll: u16,
@@ -68,6 +84,44 @@ struct AppState {
     disk_target: DiskTarget,
     disk_scroll: u16,
     disk_scan: DiskScan,
+
+    cpu_history: VecDeque<u64>,
+    normalized_load_history: VecDeque<u64>,
+    memory_history: VecDeque<u64>,
+    swap_history: VecDeque<u64>,
+    prev_cpu_stat: Option<CpuStatSample>,
+    latest_steal_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuStatSample {
+    total: u64,
+    steal: u64,
+}
+
+impl AppState {
+    fn push_dashboard_sample(&mut self, vm: &VmSnapshot) {
+        push_capped(
+            &mut self.cpu_history,
+            (vm.cpu_usage as f64 * 10.0) as u64,
+            120,
+        );
+        push_capped(
+            &mut self.normalized_load_history,
+            (vm.normalized_load * 1000.0).round() as u64,
+            120,
+        );
+        push_capped(
+            &mut self.memory_history,
+            (vm.memory_percent * 10.0).round() as u64,
+            120,
+        );
+        push_capped(
+            &mut self.swap_history,
+            (vm.swap_percent * 10.0).round() as u64,
+            120,
+        );
+    }
 }
 
 #[derive(Clone, Default)]
@@ -144,12 +198,14 @@ fn run_app(
     loop {
         // Refresh data (keep it cheap; process refresh only when on the processes screen)
         if last_tick.elapsed() >= tick_rate {
-            let refresh_processes = matches!(app.screen, Screen::Processes);
+            let refresh_processes = true;
             refresh(system, disks, refresh_processes);
+            app.latest_steal_percent = sample_steal_percent(&mut app.prev_cpu_stat);
             *last_tick = Instant::now();
         }
 
-        let vm = snapshot(system, disks);
+        let vm = snapshot(system, disks, app.latest_steal_percent);
+        app.push_dashboard_sample(&vm);
 
         terminal.draw(|frame| {
             let size = frame.size();
@@ -158,7 +214,7 @@ fn run_app(
                 .constraints([
                     Constraint::Length(1),
                     Constraint::Min(8),
-                    Constraint::Length(if app.show_help { 7 } else { 1 }),
+                    Constraint::Length(if app.show_help { 10 } else { 1 }),
                 ])
                 .margin(1)
                 .split(size);
@@ -168,7 +224,7 @@ fn run_app(
 
             // Main
             match app.screen {
-                Screen::Dashboard => render_dashboard(frame, rows[1], &vm),
+                Screen::Dashboard => render_dashboard(frame, rows[1], &vm, app, system),
                 Screen::Processes => render_processes(frame, rows[1], app, system),
                 Screen::DiskDive => render_disk_dive(frame, rows[1], app),
             }
@@ -206,10 +262,15 @@ fn run_app(
                             app.screen = Screen::DiskDive;
                         }
                         KeyCode::Char('r') => {
-                            // manual refresh, including processes if currently viewing them
-                            let refresh_processes = matches!(app.screen, Screen::Processes);
-                            refresh(system, disks, refresh_processes);
+                            refresh(system, disks, true);
+                            app.latest_steal_percent = sample_steal_percent(&mut app.prev_cpu_stat);
                             *last_tick = Instant::now();
+                        }
+                        KeyCode::Char('t') => {
+                            app.dashboard_mode = match app.dashboard_mode {
+                                DashboardMode::Visual => DashboardMode::Triage,
+                                DashboardMode::Triage => DashboardMode::Visual,
+                            };
                         }
 
                         // Processes + DiskDive share Tab for mode/target.
@@ -265,9 +326,22 @@ fn run_app(
 #[derive(Clone)]
 struct VmSnapshot {
     cpu_usage: f32,
+    cpu_cores: usize,
+    cpu_free_percent: f64,
+    load_1m: f64,
+    load_5m: f64,
+    load_15m: f64,
+    normalized_load: f64,
+    cpu_steal_percent: Option<f64>,
+    run_queue: Option<String>,
+
     total_memory: u64,
     used_memory: u64,
+    available_memory: u64,
     memory_percent: f64,
+    total_swap: u64,
+    used_swap: u64,
+    swap_percent: f64,
 
     disk_label: String,
     disk_used: u64,
@@ -275,13 +349,22 @@ struct VmSnapshot {
     disk_percent: f64,
 }
 
-fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
+fn snapshot(system: &System, disks: &Disks, cpu_steal_percent: Option<f64>) -> VmSnapshot {
     let cpu_usage = system.global_cpu_info().cpu_usage();
+    let cpu_cores = system.cpus().len().max(1);
+    let cpu_free_percent = (100.0 - cpu_usage as f64).clamp(0.0, 100.0);
+    let load = System::load_average();
+    let normalized_load = load.one / cpu_cores as f64;
+    let run_queue = read_run_queue();
 
     // sysinfo reports memory in bytes
     let total_memory = system.total_memory();
     let used_memory = system.used_memory();
+    let available_memory = system.available_memory();
     let memory_percent = percent(used_memory, total_memory);
+    let total_swap = system.total_swap();
+    let used_swap = system.used_swap();
+    let swap_percent = percent(used_swap, total_swap);
 
     let disk = pick_primary_disk(disks);
     let (disk_label, disk_used, disk_total, disk_percent) = match disk {
@@ -297,9 +380,21 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
 
     VmSnapshot {
         cpu_usage,
+        cpu_cores,
+        cpu_free_percent,
+        load_1m: load.one,
+        load_5m: load.five,
+        load_15m: load.fifteen,
+        normalized_load,
+        cpu_steal_percent,
+        run_queue,
         total_memory,
         used_memory,
+        available_memory,
         memory_percent,
+        total_swap,
+        used_swap,
+        swap_percent,
         disk_label,
         disk_used,
         disk_total,
@@ -308,8 +403,13 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
 }
 
 fn render_header(app: &AppState) -> Paragraph<'static> {
+    let mode_hint = match app.dashboard_mode {
+        DashboardMode::Visual => "mode: visual",
+        DashboardMode::Triage => "mode: triage",
+    };
+
     let (screen_name, screen_hint) = match app.screen {
-        Screen::Dashboard => ("Dashboard", "p: processes  d: disk"),
+        Screen::Dashboard => ("Dashboard", "p: processes  d: disk  t: mode"),
         Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
         Screen::DiskDive => ("Disk dive", "s: scan  Tab: target  Esc: back"),
     };
@@ -331,6 +431,8 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
                 .add_modifier(Modifier::ITALIC),
         ),
         Span::raw("  •  "),
+        Span::styled(mode_hint, Style::default().fg(Color::Magenta)),
+        Span::raw("  •  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(": quit  "),
         Span::styled("?", Style::default().fg(Color::Yellow)),
@@ -340,7 +442,9 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
 
 fn render_footer(app: &AppState) -> Paragraph<'static> {
     let tip = match app.screen {
-        Screen::Dashboard => "Tip: press p for processes, d for disk dive",
+        Screen::Dashboard => {
+            "Tip: press t to toggle Visual/Triage, p for processes, d for disk dive"
+        }
         Screen::Processes => "Tip: Tab toggles sort (CPU/Mem). Use ↑/↓ to scroll",
         Screen::DiskDive => {
             "Tip: press s to scan (on-demand). Tab changes target. Results are cached"
@@ -365,6 +469,7 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
         Line::from("  ? — toggle help"),
         Line::from("  Esc — back to dashboard"),
         Line::from("  r — refresh now"),
+        Line::from("  t — toggle Visual/Triage mode"),
         Line::from(""),
     ];
 
@@ -392,7 +497,62 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
+fn render_dashboard(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    vm: &VmSnapshot,
+    app: &AppState,
+    system: &System,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(8)])
+        .split(area);
+
+    let health = summarize_health(vm, app);
+    let health_color = match health.status {
+        HealthStatus::Ok => Color::Green,
+        HealthStatus::Warning => Color::Yellow,
+        HealthStatus::Critical => Color::Red,
+    };
+
+    let mut health_lines = vec![Line::from(vec![
+        Span::styled("Status: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            health.status.label(),
+            Style::default()
+                .fg(health_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  ·  "),
+        Span::styled("Reason: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            health.primary_reason.clone(),
+            Style::default().fg(Color::White),
+        ),
+    ])];
+    if !health.secondary.is_empty() {
+        health_lines.push(Line::from(vec![
+            Span::styled("Contributors: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                health.secondary.join(" | "),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(health_lines)
+            .block(
+                Block::default()
+                    .title("Health Summary")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(health_color)),
+            )
+            .alignment(Alignment::Left),
+        rows[0],
+    );
+
     let panels = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -400,55 +560,27 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
             Constraint::Percentage(33),
             Constraint::Percentage(33),
         ])
-        .split(area);
+        .split(rows[1]);
 
-    // CPU
-    let cpu_block = Block::default()
-        .title("CPU")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let cpu_gauge = Gauge::default()
-        .block(cpu_block)
-        .gauge_style(Style::default().fg(color_for_pct(vm.cpu_usage as f64)))
-        .label(format!("{:.1}%", vm.cpu_usage))
-        .ratio(((vm.cpu_usage as f64) / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(cpu_gauge, panels[0]);
-
-    // Memory
-    let memory_block = Block::default()
-        .title("Memory")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
-    let memory_lines = vec![
-        Line::from(vec![
-            Span::styled("Used: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!(
-                    "{} / {}",
-                    format_bytes(vm.used_memory),
-                    format_bytes(vm.total_memory)
-                ),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Usage: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:.1}%", vm.memory_percent),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-    ];
-    let memory_paragraph = Paragraph::new(memory_lines)
-        .block(memory_block)
-        .alignment(Alignment::Left);
-    frame.render_widget(memory_paragraph, panels[1]);
+    render_cpu_panel(frame, panels[0], vm, app, system, health.status);
+    render_memory_panel(frame, panels[1], vm, app, system, health.status);
 
     // Disk
     let disk_block = Block::default()
         .title("Disk")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
+    frame.render_widget(disk_block.clone(), panels[2]);
+    let disk_inner = disk_block.inner(panels[2]);
+    let disk_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(disk_inner);
+
     let disk_lines = vec![
         Line::from(vec![
             Span::styled("Mount: ", Style::default().fg(Color::Gray)),
@@ -470,16 +602,559 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
             Span::styled("Usage: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.disk_percent),
-                Style::default().fg(Color::White),
+                Style::default()
+                    .fg(color_for_memory_threshold(vm.disk_percent))
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
     frame.render_widget(
-        Paragraph::new(disk_lines)
-            .block(disk_block)
-            .alignment(Alignment::Left),
-        panels[2],
+        Paragraph::new(disk_lines).alignment(Alignment::Left),
+        disk_chunks[0],
     );
+
+    let segments = segmented_usage_spans(vm.disk_percent, disk_chunks[1].width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(segments)).alignment(Alignment::Left),
+        disk_chunks[1],
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthStatus {
+    Ok,
+    Warning,
+    Critical,
+}
+
+impl HealthStatus {
+    fn label(self) -> &'static str {
+        match self {
+            HealthStatus::Ok => "OK",
+            HealthStatus::Warning => "WARNING",
+            HealthStatus::Critical => "CRITICAL",
+        }
+    }
+}
+
+struct HealthSummary {
+    status: HealthStatus,
+    primary_reason: String,
+    secondary: Vec<String>,
+}
+
+fn render_cpu_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    vm: &VmSnapshot,
+    app: &AppState,
+    system: &System,
+    overall: HealthStatus,
+) {
+    let triage = matches!(app.dashboard_mode, DashboardMode::Triage);
+    let cpu_color = cpu_pressure_color(vm);
+    let cpu_block = Block::default()
+        .title("CPU")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(cpu_block.clone(), area);
+
+    let inner = cpu_block.inner(area);
+    let graph_height = if triage {
+        ((inner.height as f64) * 0.35) as u16
+    } else {
+        ((inner.height as f64) * 0.65) as u16
+    }
+    .clamp(6, inner.height.saturating_sub(3));
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(graph_height), Constraint::Min(2)])
+        .split(inner);
+
+    render_threshold_bands(
+        frame,
+        chunks[0],
+        &[
+            (0.0, 70.0, Color::Rgb(15, 30, 15)),
+            (70.0, 100.0, Color::Rgb(35, 35, 10)),
+            (100.0, 120.0, Color::Rgb(40, 12, 12)),
+        ],
+    );
+
+    let cpu_points = step_points(&app.cpu_history, 10.0);
+    let load_points = step_points(&app.normalized_load_history, 10.0);
+    let threshold_70 = horizontal_line(cpu_points.len().max(2), 70.0);
+    let threshold_100 = horizontal_line(cpu_points.len().max(2), 100.0);
+
+    let datasets = vec![
+        Dataset::default()
+            .name("cpu")
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(cpu_color))
+            .data(&cpu_points),
+        Dataset::default()
+            .name("load")
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(Color::LightBlue))
+            .data(&load_points),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&threshold_70),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Red))
+            .data(&threshold_100),
+    ];
+
+    frame.render_widget(
+        Chart::new(datasets)
+            .x_axis(Axis::default().bounds([0.0, cpu_points.len().max(2) as f64]))
+            .y_axis(Axis::default().bounds([0.0, 120.0])),
+        chunks[0],
+    );
+
+    let mut lines = vec![
+        Line::from(format!(
+            "Load: {:.2} / {:.2} / {:.2}",
+            vm.load_1m, vm.load_5m, vm.load_15m
+        )),
+        Line::from(vec![
+            Span::styled("Norm load: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.0}%", vm.normalized_load * 100.0),
+                Style::default()
+                    .fg(if vm.normalized_load > 1.0 {
+                        Color::Red
+                    } else {
+                        cpu_color
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  Cores: {}  Used/Free: {:.1}% / {:.1}%",
+                vm.cpu_cores, vm.cpu_usage, vm.cpu_free_percent
+            )),
+        ]),
+    ];
+    if let Some(steal) = vm.cpu_steal_percent {
+        lines.push(Line::from(format!("Steal: {:.1}%", steal)));
+    }
+    if let Some(rq) = &vm.run_queue {
+        lines.push(Line::from(format!("Run queue: {rq}")));
+    }
+    if triage {
+        let top_cpu = top_processes(system, ProcSort::Cpu, 3);
+        lines.push(Line::from("Top CPU:"));
+        lines.extend(
+            top_cpu
+                .into_iter()
+                .map(|p| Line::from(format!("  {} ({:.1}%)", p.name, p.cpu_x10 as f64 / 10.0))),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(if overall == HealthStatus::Ok && !triage {
+                Style::default().fg(Color::Gray)
+            } else {
+                Style::default().fg(Color::White)
+            })
+            .alignment(Alignment::Left),
+        chunks[1],
+    );
+}
+
+fn render_memory_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    vm: &VmSnapshot,
+    app: &AppState,
+    system: &System,
+    overall: HealthStatus,
+) {
+    let triage = matches!(app.dashboard_mode, DashboardMode::Triage);
+    let mem_color = memory_pressure_color(vm, app);
+    let memory_block = Block::default()
+        .title("Memory")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(memory_block.clone(), area);
+
+    let inner = memory_block.inner(area);
+    let graph_height = if triage {
+        ((inner.height as f64) * 0.35) as u16
+    } else {
+        ((inner.height as f64) * 0.65) as u16
+    }
+    .clamp(6, inner.height.saturating_sub(3));
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(graph_height), Constraint::Min(2)])
+        .split(inner);
+
+    render_threshold_bands(
+        frame,
+        chunks[0],
+        &[
+            (0.0, 75.0, Color::Rgb(15, 30, 15)),
+            (75.0, 90.0, Color::Rgb(35, 30, 10)),
+            (90.0, 100.0, Color::Rgb(40, 12, 12)),
+        ],
+    );
+
+    let mem_points = step_points(&app.memory_history, 10.0);
+    let swap_points = step_points(&app.swap_history, 10.0);
+    let threshold_75 = horizontal_line(mem_points.len().max(2), 75.0);
+    let threshold_90 = horizontal_line(mem_points.len().max(2), 90.0);
+
+    let datasets = vec![
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(mem_color))
+            .data(&mem_points),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(Color::LightBlue))
+            .data(&swap_points),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&threshold_75),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Red))
+            .data(&threshold_90),
+    ];
+
+    frame.render_widget(
+        Chart::new(datasets)
+            .x_axis(Axis::default().bounds([0.0, mem_points.len().max(2) as f64]))
+            .y_axis(Axis::default().bounds([0.0, 100.0])),
+        chunks[0],
+    );
+
+    let avail_pct = available_percent(vm);
+    let mut lines = vec![
+        Line::from(format!(
+            "Used: {} / {}",
+            format_bytes(vm.used_memory),
+            format_bytes(vm.total_memory),
+        )),
+        Line::from(vec![
+            Span::styled("Avail: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ({:.1}%)", format_bytes(vm.available_memory), avail_pct),
+                Style::default().fg(if avail_pct < 10.0 {
+                    Color::Red
+                } else {
+                    Color::White
+                }),
+            ),
+        ]),
+        Line::from(format!(
+            "Swap: {} / {} ({:.1}%)",
+            format_bytes(vm.used_swap),
+            format_bytes(vm.total_swap),
+            vm.swap_percent
+        )),
+        Line::from(format!("Swap trend: {}", swap_trend(app))),
+    ];
+    if triage {
+        let top_mem = top_processes(system, ProcSort::Mem, 3);
+        lines.push(Line::from("Top Memory:"));
+        lines.extend(
+            top_mem
+                .into_iter()
+                .map(|p| Line::from(format!("  {} ({})", p.name, format_bytes(p.mem_bytes)))),
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(if overall == HealthStatus::Ok && !triage {
+                Style::default().fg(Color::Gray)
+            } else {
+                Style::default().fg(Color::White)
+            })
+            .alignment(Alignment::Left),
+        chunks[1],
+    );
+}
+
+fn render_threshold_bands(frame: &mut ratatui::Frame, area: Rect, bands: &[(f64, f64, Color)]) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    for (low, high, color) in bands {
+        let top = ((100.0 - high.min(100.0).max(0.0)) / 100.0 * area.height as f64) as u16;
+        let bottom = ((100.0 - low.min(100.0).max(0.0)) / 100.0 * area.height as f64) as u16;
+        let height = bottom
+            .saturating_sub(top)
+            .max(1)
+            .min(area.height.saturating_sub(top));
+        if height == 0 {
+            continue;
+        }
+        let band_area = Rect {
+            x: area.x,
+            y: area.y + top.min(area.height.saturating_sub(1)),
+            width: area.width,
+            height,
+        };
+        let blank = " ".repeat(area.width as usize);
+        let lines: Vec<Line> = (0..height)
+            .map(|_| Line::from(Span::styled(blank.clone(), Style::default().bg(*color))))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), band_area);
+    }
+}
+
+fn step_points(series: &VecDeque<u64>, scale: f64) -> Vec<(f64, f64)> {
+    if series.is_empty() {
+        return vec![(0.0, 0.0), (1.0, 0.0)];
+    }
+
+    let mut points = Vec::with_capacity(series.len() * 2);
+    for (idx, value) in series.iter().enumerate() {
+        let y = *value as f64 / scale;
+        let x = idx as f64;
+        if idx == 0 {
+            points.push((x, y));
+        } else {
+            points.push((x, points.last().map(|p| p.1).unwrap_or(y)));
+            points.push((x, y));
+        }
+    }
+    points
+}
+
+fn horizontal_line(len: usize, y: f64) -> Vec<(f64, f64)> {
+    vec![(0.0, y), (len.max(2) as f64, y)]
+}
+
+fn segmented_usage_spans(usage_pct: f64, width: usize) -> Vec<Span<'static>> {
+    let bar_width = width.clamp(10, 50);
+    let filled = ((usage_pct / 100.0) * bar_width as f64).round() as usize;
+
+    (0..bar_width)
+        .map(|i| {
+            let pct = i as f64 / bar_width as f64 * 100.0;
+            let color = if pct < 70.0 {
+                Color::Green
+            } else if pct < 90.0 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            let ch = if i < filled { '█' } else { '░' };
+            Span::styled(ch.to_string(), Style::default().fg(color))
+        })
+        .collect()
+}
+
+fn color_for_memory_threshold(pct: f64) -> Color {
+    if pct >= 90.0 {
+        Color::Red
+    } else if pct >= 75.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+fn summarize_health(vm: &VmSnapshot, app: &AppState) -> HealthSummary {
+    let mut issues: Vec<(HealthStatus, String)> = Vec::new();
+
+    if vm.normalized_load > 1.0 {
+        issues.push((
+            HealthStatus::Critical,
+            "CPU pressure: normalized load above 1.0".to_string(),
+        ));
+    } else if vm.normalized_load > 0.7 {
+        issues.push((HealthStatus::Warning, "CPU load elevated".to_string()));
+    }
+
+    if available_percent(vm) < 15.0 {
+        issues.push((
+            HealthStatus::Critical,
+            "Memory pressure: low available memory".to_string(),
+        ));
+    } else if available_percent(vm) < 20.0 {
+        issues.push((
+            HealthStatus::Warning,
+            "Memory availability dropping".to_string(),
+        ));
+    }
+
+    if vm.used_swap > 0 && swap_is_increasing(app) {
+        issues.push((
+            HealthStatus::Critical,
+            "Memory pressure: swap active and increasing".to_string(),
+        ));
+    }
+
+    if vm.cpu_steal_percent.unwrap_or(0.0) > 10.0 {
+        issues.push((
+            HealthStatus::Critical,
+            "Possible noisy neighbor: steal time above 10%".to_string(),
+        ));
+    }
+
+    if vm.normalized_load > 1.0 && vm.cpu_usage < 50.0 {
+        issues.push((
+            HealthStatus::Warning,
+            "High load with lower CPU usage: possible IO bottleneck".to_string(),
+        ));
+    }
+
+    if issues.is_empty() {
+        return HealthSummary {
+            status: HealthStatus::Ok,
+            primary_reason: "All major signals healthy".to_string(),
+            secondary: vec![],
+        };
+    }
+
+    let status = issues
+        .iter()
+        .map(|(s, _)| *s)
+        .max_by_key(|s| match s {
+            HealthStatus::Ok => 0,
+            HealthStatus::Warning => 1,
+            HealthStatus::Critical => 2,
+        })
+        .unwrap_or(HealthStatus::Warning);
+
+    HealthSummary {
+        status,
+        primary_reason: issues[0].1.clone(),
+        secondary: issues.into_iter().skip(1).map(|(_, text)| text).collect(),
+    }
+}
+
+fn top_processes(system: &System, sort: ProcSort, count: usize) -> Vec<ProcRow> {
+    let mut procs: Vec<ProcRow> = system
+        .processes()
+        .iter()
+        .map(|(pid, p)| ProcRow::from_process(*pid, p))
+        .collect();
+
+    match sort {
+        ProcSort::Cpu => procs.sort_by_key(|p| Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))),
+        ProcSort::Mem => procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))),
+    }
+
+    procs.into_iter().take(count).collect()
+}
+
+fn cpu_pressure_color(vm: &VmSnapshot) -> Color {
+    if vm.cpu_steal_percent.unwrap_or(0.0) > 10.0 || vm.normalized_load > 1.0 {
+        Color::Red
+    } else if vm.normalized_load >= 0.7 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+fn memory_pressure_color(vm: &VmSnapshot, app: &AppState) -> Color {
+    let avail = available_percent(vm);
+    if avail < 10.0 || (vm.used_swap > 0 && swap_is_increasing(app)) {
+        Color::Red
+    } else if avail <= 20.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+fn available_percent(vm: &VmSnapshot) -> f64 {
+    percent(vm.available_memory, vm.total_memory)
+}
+
+fn swap_is_increasing(app: &AppState) -> bool {
+    if app.swap_history.len() < 6 {
+        return false;
+    }
+    let mut it = app.swap_history.iter().rev();
+    let newest = *it.next().unwrap_or(&0);
+    let older = *it.nth(4).unwrap_or(&newest);
+    newest > older && newest > 0
+}
+
+fn swap_trend(app: &AppState) -> &'static str {
+    if app.swap_history.len() < 4 {
+        return "warming up";
+    }
+    let last = *app.swap_history.back().unwrap_or(&0);
+    let prev = app
+        .swap_history
+        .iter()
+        .rev()
+        .nth(3)
+        .copied()
+        .unwrap_or(last);
+    if last > prev {
+        "increasing"
+    } else if last < prev {
+        "decreasing"
+    } else {
+        "stable"
+    }
+}
+
+fn read_run_queue() -> Option<String> {
+    let txt = std::fs::read_to_string("/proc/loadavg").ok()?;
+    let mut parts = txt.split_whitespace();
+    let _ = parts.next()?;
+    let _ = parts.next()?;
+    let _ = parts.next()?;
+    parts.next().map(ToString::to_string)
+}
+
+fn sample_steal_percent(prev: &mut Option<CpuStatSample>) -> Option<f64> {
+    let txt = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = txt.lines().find(|line| line.starts_with("cpu "))?;
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|v| v.parse::<u64>().ok())
+        .collect();
+    if values.len() < 8 {
+        return None;
+    }
+    let total: u64 = values.iter().sum();
+    let steal = values[7];
+    let current = CpuStatSample { total, steal };
+
+    let pct = if let Some(p) = prev {
+        let dt = current.total.saturating_sub(p.total);
+        let ds = current.steal.saturating_sub(p.steal);
+        if dt == 0 {
+            None
+        } else {
+            Some((ds as f64 / dt as f64) * 100.0)
+        }
+    } else {
+        None
+    };
+
+    *prev = Some(current);
+    pct
+}
+
+fn push_capped(buf: &mut VecDeque<u64>, value: u64, cap: usize) {
+    if buf.len() >= cap {
+        buf.pop_front();
+    }
+    buf.push_back(value);
 }
 
 fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, system: &System) {
@@ -825,16 +1500,6 @@ fn percent(used: u64, total: u64) -> f64 {
         0.0
     } else {
         (used as f64 / total as f64) * 100.0
-    }
-}
-
-fn color_for_pct(pct: f64) -> Color {
-    if pct >= 90.0 {
-        Color::Red
-    } else if pct >= 75.0 {
-        Color::Yellow
-    } else {
-        Color::Green
     }
 }
 
