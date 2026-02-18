@@ -15,7 +15,9 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::widgets::{
+    Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Wrap,
+};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{DiskKind, Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
@@ -84,6 +86,7 @@ struct AppState {
     disk_scan: DiskScan,
 
     cpu_history: VecDeque<u64>,
+    normalized_load_history: VecDeque<u64>,
     memory_history: VecDeque<u64>,
     swap_history: VecDeque<u64>,
     prev_cpu_stat: Option<CpuStatSample>,
@@ -101,6 +104,11 @@ impl AppState {
         push_capped(
             &mut self.cpu_history,
             (vm.cpu_usage as f64 * 10.0) as u64,
+            120,
+        );
+        push_capped(
+            &mut self.normalized_load_history,
+            (vm.normalized_load * 1000.0).round() as u64,
             120,
         );
         push_capped(
@@ -562,6 +570,17 @@ fn render_dashboard(
         .title("Disk")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
+    frame.render_widget(disk_block.clone(), panels[2]);
+    let disk_inner = disk_block.inner(panels[2]);
+    let disk_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(disk_inner);
+
     let disk_lines = vec![
         Line::from(vec![
             Span::styled("Mount: ", Style::default().fg(Color::Gray)),
@@ -583,15 +602,21 @@ fn render_dashboard(
             Span::styled("Usage: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.disk_percent),
-                Style::default().fg(Color::White),
+                Style::default()
+                    .fg(color_for_memory_threshold(vm.disk_percent))
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
     frame.render_widget(
-        Paragraph::new(disk_lines)
-            .block(disk_block)
-            .alignment(Alignment::Left),
-        panels[2],
+        Paragraph::new(disk_lines).alignment(Alignment::Left),
+        disk_chunks[0],
+    );
+
+    let segments = segmented_usage_spans(vm.disk_percent, disk_chunks[1].width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(segments)).alignment(Alignment::Left),
+        disk_chunks[1],
     );
 }
 
@@ -631,7 +656,7 @@ fn render_cpu_panel(
     let cpu_block = Block::default()
         .title("CPU")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(cpu_color));
+        .border_style(Style::default().fg(Color::DarkGray));
     frame.render_widget(cpu_block.clone(), area);
 
     let inner = cpu_block.inner(area);
@@ -640,19 +665,55 @@ fn render_cpu_panel(
     } else {
         ((inner.height as f64) * 0.65) as u16
     }
-    .clamp(3, inner.height.saturating_sub(2));
+    .clamp(6, inner.height.saturating_sub(3));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(graph_height), Constraint::Min(2)])
         .split(inner);
 
-    let cpu_data: Vec<u64> = app.cpu_history.iter().copied().collect();
+    render_threshold_bands(
+        frame,
+        chunks[0],
+        &[
+            (0.0, 70.0, Color::Rgb(15, 30, 15)),
+            (70.0, 100.0, Color::Rgb(35, 35, 10)),
+            (100.0, 120.0, Color::Rgb(40, 12, 12)),
+        ],
+    );
+
+    let cpu_points = step_points(&app.cpu_history, 10.0);
+    let load_points = step_points(&app.normalized_load_history, 10.0);
+    let threshold_70 = horizontal_line(cpu_points.len().max(2), 70.0);
+    let threshold_100 = horizontal_line(cpu_points.len().max(2), 100.0);
+
+    let datasets = vec![
+        Dataset::default()
+            .name("cpu")
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(cpu_color))
+            .data(&cpu_points),
+        Dataset::default()
+            .name("load")
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(Color::LightBlue))
+            .data(&load_points),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&threshold_70),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Red))
+            .data(&threshold_100),
+    ];
+
     frame.render_widget(
-        Sparkline::default()
-            .data(&cpu_data)
-            .max(1000)
-            .style(Style::default().fg(cpu_color)),
+        Chart::new(datasets)
+            .x_axis(Axis::default().bounds([0.0, cpu_points.len().max(2) as f64]))
+            .y_axis(Axis::default().bounds([0.0, 120.0])),
         chunks[0],
     );
 
@@ -661,13 +722,23 @@ fn render_cpu_panel(
             "Load: {:.2} / {:.2} / {:.2}",
             vm.load_1m, vm.load_5m, vm.load_15m
         )),
-        Line::from(format!(
-            "Norm load: {:.0}%  Cores: {}  Used/Free: {:.1}% / {:.1}%",
-            vm.normalized_load * 100.0,
-            vm.cpu_cores,
-            vm.cpu_usage,
-            vm.cpu_free_percent
-        )),
+        Line::from(vec![
+            Span::styled("Norm load: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.0}%", vm.normalized_load * 100.0),
+                Style::default()
+                    .fg(if vm.normalized_load > 1.0 {
+                        Color::Red
+                    } else {
+                        cpu_color
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  Cores: {}  Used/Free: {:.1}% / {:.1}%",
+                vm.cpu_cores, vm.cpu_usage, vm.cpu_free_percent
+            )),
+        ]),
     ];
     if let Some(steal) = vm.cpu_steal_percent {
         lines.push(Line::from(format!("Steal: {:.1}%", steal)));
@@ -709,7 +780,7 @@ fn render_memory_panel(
     let memory_block = Block::default()
         .title("Memory")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(mem_color));
+        .border_style(Style::default().fg(Color::DarkGray));
     frame.render_widget(memory_block.clone(), area);
 
     let inner = memory_block.inner(area);
@@ -718,43 +789,74 @@ fn render_memory_panel(
     } else {
         ((inner.height as f64) * 0.65) as u16
     }
-    .clamp(4, inner.height.saturating_sub(2));
+    .clamp(6, inner.height.saturating_sub(3));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(graph_height), Constraint::Min(2)])
         .split(inner);
 
-    let graph_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[0]);
-
-    let mem_data: Vec<u64> = app.memory_history.iter().copied().collect();
-    frame.render_widget(
-        Sparkline::default()
-            .data(&mem_data)
-            .max(1000)
-            .style(Style::default().fg(mem_color)),
-        graph_rows[0],
-    );
-    let swap_data: Vec<u64> = app.swap_history.iter().copied().collect();
-    frame.render_widget(
-        Sparkline::default()
-            .data(&swap_data)
-            .max(1000)
-            .style(Style::default().fg(Color::Cyan)),
-        graph_rows[1],
+    render_threshold_bands(
+        frame,
+        chunks[0],
+        &[
+            (0.0, 75.0, Color::Rgb(15, 30, 15)),
+            (75.0, 90.0, Color::Rgb(35, 30, 10)),
+            (90.0, 100.0, Color::Rgb(40, 12, 12)),
+        ],
     );
 
+    let mem_points = step_points(&app.memory_history, 10.0);
+    let swap_points = step_points(&app.swap_history, 10.0);
+    let threshold_75 = horizontal_line(mem_points.len().max(2), 75.0);
+    let threshold_90 = horizontal_line(mem_points.len().max(2), 90.0);
+
+    let datasets = vec![
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(mem_color))
+            .data(&mem_points),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(Color::LightBlue))
+            .data(&swap_points),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&threshold_75),
+        Dataset::default()
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Red))
+            .data(&threshold_90),
+    ];
+
+    frame.render_widget(
+        Chart::new(datasets)
+            .x_axis(Axis::default().bounds([0.0, mem_points.len().max(2) as f64]))
+            .y_axis(Axis::default().bounds([0.0, 100.0])),
+        chunks[0],
+    );
+
+    let avail_pct = available_percent(vm);
     let mut lines = vec![
         Line::from(format!(
-            "Used: {} / {}  Avail: {} ({:.1}%)",
+            "Used: {} / {}",
             format_bytes(vm.used_memory),
             format_bytes(vm.total_memory),
-            format_bytes(vm.available_memory),
-            available_percent(vm)
         )),
+        Line::from(vec![
+            Span::styled("Avail: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ({:.1}%)", format_bytes(vm.available_memory), avail_pct),
+                Style::default().fg(if avail_pct < 10.0 {
+                    Color::Red
+                } else {
+                    Color::White
+                }),
+            ),
+        ]),
         Line::from(format!(
             "Swap: {} / {} ({:.1}%)",
             format_bytes(vm.used_swap),
@@ -771,7 +873,6 @@ fn render_memory_panel(
                 .into_iter()
                 .map(|p| Line::from(format!("  {} ({})", p.name, format_bytes(p.mem_bytes)))),
         );
-        lines.push(Line::from("OOM: not available (requires log parsing)"));
     }
 
     frame.render_widget(
@@ -784,6 +885,88 @@ fn render_memory_panel(
             .alignment(Alignment::Left),
         chunks[1],
     );
+}
+
+fn render_threshold_bands(frame: &mut ratatui::Frame, area: Rect, bands: &[(f64, f64, Color)]) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    for (low, high, color) in bands {
+        let top = ((100.0 - high.min(100.0).max(0.0)) / 100.0 * area.height as f64) as u16;
+        let bottom = ((100.0 - low.min(100.0).max(0.0)) / 100.0 * area.height as f64) as u16;
+        let height = bottom
+            .saturating_sub(top)
+            .max(1)
+            .min(area.height.saturating_sub(top));
+        if height == 0 {
+            continue;
+        }
+        let band_area = Rect {
+            x: area.x,
+            y: area.y + top.min(area.height.saturating_sub(1)),
+            width: area.width,
+            height,
+        };
+        let blank = " ".repeat(area.width as usize);
+        let lines: Vec<Line> = (0..height)
+            .map(|_| Line::from(Span::styled(blank.clone(), Style::default().bg(*color))))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), band_area);
+    }
+}
+
+fn step_points(series: &VecDeque<u64>, scale: f64) -> Vec<(f64, f64)> {
+    if series.is_empty() {
+        return vec![(0.0, 0.0), (1.0, 0.0)];
+    }
+
+    let mut points = Vec::with_capacity(series.len() * 2);
+    for (idx, value) in series.iter().enumerate() {
+        let y = *value as f64 / scale;
+        let x = idx as f64;
+        if idx == 0 {
+            points.push((x, y));
+        } else {
+            points.push((x, points.last().map(|p| p.1).unwrap_or(y)));
+            points.push((x, y));
+        }
+    }
+    points
+}
+
+fn horizontal_line(len: usize, y: f64) -> Vec<(f64, f64)> {
+    vec![(0.0, y), (len.max(2) as f64, y)]
+}
+
+fn segmented_usage_spans(usage_pct: f64, width: usize) -> Vec<Span<'static>> {
+    let bar_width = width.clamp(10, 50);
+    let filled = ((usage_pct / 100.0) * bar_width as f64).round() as usize;
+
+    (0..bar_width)
+        .map(|i| {
+            let pct = i as f64 / bar_width as f64 * 100.0;
+            let color = if pct < 70.0 {
+                Color::Green
+            } else if pct < 90.0 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            let ch = if i < filled { '█' } else { '░' };
+            Span::styled(ch.to_string(), Style::default().fg(color))
+        })
+        .collect()
+}
+
+fn color_for_memory_threshold(pct: f64) -> Color {
+    if pct >= 90.0 {
+        Color::Red
+    } else if pct >= 75.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
 }
 
 fn summarize_health(vm: &VmSnapshot, app: &AppState) -> HealthSummary {
