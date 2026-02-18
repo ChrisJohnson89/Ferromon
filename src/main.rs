@@ -593,7 +593,24 @@ fn render_dashboard(
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
+        Line::from(format!(
+            "Swap: {} / {} ({:.1}%)",
+            format_bytes(vm.used_swap),
+            format_bytes(vm.total_swap),
+            vm.swap_percent
+        )),
+        Line::from(format!("Swap trend: {}", swap_trend(app))),
     ];
+    if triage {
+        let top_mem = top_processes(system, ProcSort::Mem, 3);
+        lines.push(Line::from("Top Memory:"));
+        lines.extend(
+            top_mem
+                .into_iter()
+                .map(|p| Line::from(format!("  {} ({})", p.name, format_bytes(p.mem_bytes)))),
+        );
+    }
+
     frame.render_widget(
         Paragraph::new(disk_lines).alignment(Alignment::Left),
         disk_chunks[0],
