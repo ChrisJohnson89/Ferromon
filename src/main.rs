@@ -419,6 +419,14 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
         .title("Memory")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
+    frame.render_widget(memory_block.clone(), panels[1]);
+
+    let memory_inner = memory_block.inner(panels[1]);
+    let memory_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(memory_inner);
+
     let memory_lines = vec![
         Line::from(vec![
             Span::styled("Used: ", Style::default().fg(Color::Gray)),
@@ -439,10 +447,13 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
             ),
         ]),
     ];
-    let memory_paragraph = Paragraph::new(memory_lines)
-        .block(memory_block)
-        .alignment(Alignment::Left);
-    frame.render_widget(memory_paragraph, panels[1]);
+    let memory_paragraph = Paragraph::new(memory_lines).alignment(Alignment::Left);
+    frame.render_widget(memory_paragraph, memory_chunks[0]);
+
+    let memory_gauge = Gauge::default()
+        .gauge_style(Style::default().fg(color_for_pct(vm.memory_percent)))
+        .ratio((vm.memory_percent / 100.0).clamp(0.0, 1.0));
+    frame.render_widget(memory_gauge, memory_chunks[1]);
 
     // Disk
     let disk_block = Block::default()
