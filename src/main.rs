@@ -265,6 +265,8 @@ fn run_app(
 #[derive(Clone)]
 struct VmSnapshot {
     cpu_usage: f32,
+    cpu_cores: usize,
+    cpu_free_percent: f64,
     total_memory: u64,
     used_memory: u64,
     memory_percent: f64,
@@ -277,6 +279,8 @@ struct VmSnapshot {
 
 fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
     let cpu_usage = system.global_cpu_info().cpu_usage();
+    let cpu_cores = system.cpus().len();
+    let cpu_free_percent = (100.0 - cpu_usage as f64).clamp(0.0, 100.0);
 
     // sysinfo reports memory in bytes
     let total_memory = system.total_memory();
@@ -297,6 +301,8 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
 
     VmSnapshot {
         cpu_usage,
+        cpu_cores,
+        cpu_free_percent,
         total_memory,
         used_memory,
         memory_percent,
@@ -407,12 +413,44 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
         .title("CPU")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(cpu_block.clone(), panels[0]);
+
+    let cpu_inner = cpu_block.inner(panels[0]);
+    let cpu_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(cpu_inner);
+
+    let cpu_lines = vec![
+        Line::from(vec![
+            Span::styled("Used: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.1}%", vm.cpu_usage),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Free: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.1}%", vm.cpu_free_percent),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Cores: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", vm.cpu_cores),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ];
+    let cpu_paragraph = Paragraph::new(cpu_lines).alignment(Alignment::Left);
+    frame.render_widget(cpu_paragraph, cpu_chunks[0]);
+
     let cpu_gauge = Gauge::default()
-        .block(cpu_block)
         .gauge_style(Style::default().fg(color_for_pct(vm.cpu_usage as f64)))
-        .label(format!("{:.1}%", vm.cpu_usage))
         .ratio(((vm.cpu_usage as f64) / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(cpu_gauge, panels[0]);
+    frame.render_widget(cpu_gauge, cpu_chunks[1]);
 
     // Memory
     let memory_block = Block::default()
