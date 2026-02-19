@@ -51,6 +51,18 @@ enum DiskTarget {
     Root,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashDirTarget {
+    Cwd,
+    Var,
+}
+
+impl Default for DashDirTarget {
+    fn default() -> Self {
+        DashDirTarget::Cwd
+    }
+}
+
 impl Default for DiskTarget {
     fn default() -> Self {
         DiskTarget::Var
@@ -70,9 +82,10 @@ struct AppState {
     disk_scan: DiskScan,
 
     // Dashboard caches (quick overview)
+    dash_dir_target: DashDirTarget,
+    dash_dir_sizes: Vec<String>,
     dash_top_cpu: Vec<String>,
     dash_top_mem: Vec<String>,
-    dash_cwd_sizes: Vec<String>,
     dash_last_proc_at: Option<Instant>,
     dash_last_fs_at: Option<Instant>,
 }
@@ -266,9 +279,16 @@ fn run_app(
                             }
                         }
 
-                        // Disk dive controls
+                        // Tab is contextual.
                         KeyCode::Tab => {
-                            if matches!(app.screen, Screen::DiskDive) {
+                            if matches!(app.screen, Screen::Dashboard) {
+                                app.dash_dir_target = match app.dash_dir_target {
+                                    DashDirTarget::Cwd => DashDirTarget::Var,
+                                    DashDirTarget::Var => DashDirTarget::Cwd,
+                                };
+                                // Force refresh of quick scan.
+                                app.dash_last_fs_at = None;
+                            } else if matches!(app.screen, Screen::DiskDive) {
                                 app.disk_target = match app.disk_target {
                                     DiskTarget::Var => DiskTarget::Home,
                                     DiskTarget::Home => DiskTarget::Root,
@@ -353,7 +373,7 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
 
 fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
-        Screen::Dashboard => ("Dashboard", "p: processes  d: disk"),
+        Screen::Dashboard => ("Dashboard", "p: processes  d: disk  Tab: dir"),
         Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
         Screen::DiskDive => ("Disk dive", "s: scan  Tab: target  Esc: back"),
     };
@@ -417,6 +437,7 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
             lines.push(Line::from("Dashboard:"));
             lines.push(Line::from("  p — processes"));
             lines.push(Line::from("  d — disk dive"));
+            lines.push(Line::from("  Tab — toggle dir target (CWD ↔ /var)"));
         }
         Screen::Processes => {
             lines.push(Line::from("Processes:"));
@@ -463,7 +484,19 @@ fn render_dashboard(
     if need_fs {
         app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 3);
         app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 3);
-        app.dash_cwd_sizes = scan_cwd_quick(6);
+        let (label, path) = dash_target_path(app.dash_dir_target);
+        app.dash_dir_sizes = scan_dir_quick(&path, 6);
+        // stash label in first line of the list for display
+        let prefix = match app.dash_dir_target {
+            DashDirTarget::Cwd => "CWD",
+            DashDirTarget::Var => "/var",
+        };
+        if !app.dash_dir_sizes.is_empty() {
+            app.dash_dir_sizes
+                .insert(0, format!("{}: {}", prefix, label));
+        } else {
+            app.dash_dir_sizes = vec![format!("{}: {}", prefix, label), "(no entries)".to_string()];
+        }
         app.dash_last_fs_at = Some(now);
     }
 
@@ -659,27 +692,32 @@ fn render_dashboard(
         disk_chunks[0],
     );
 
-    let mut cwd_lines: Vec<Line> = Vec::new();
-    cwd_lines.push(Line::from(vec![Span::styled(
-        format!("CWD: {}", current_dir_label()),
-        Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    )]));
-
-    if app.dash_cwd_sizes.is_empty() {
-        cwd_lines.push(Line::from(Span::styled(
-            "(no entries)",
+    let mut dir_lines: Vec<Line> = Vec::new();
+    if app.dash_dir_sizes.is_empty() {
+        dir_lines.push(Line::from(Span::styled(
+            "Dir: (no data)",
             Style::default().fg(Color::Gray),
         )));
     } else {
-        for row in app.dash_cwd_sizes.iter() {
-            cwd_lines.push(Line::from(Span::raw(row.clone())));
+        // First line is a label we inject during scan.
+        let mut first = true;
+        for row in app.dash_dir_sizes.iter() {
+            if first {
+                dir_lines.push(Line::from(Span::styled(
+                    row.clone(),
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                first = false;
+                continue;
+            }
+            dir_lines.push(Line::from(Span::raw(row.clone())));
         }
     }
 
     frame.render_widget(
-        Paragraph::new(cwd_lines).alignment(Alignment::Left),
+        Paragraph::new(dir_lines).alignment(Alignment::Left),
         disk_chunks[1],
     );
 }
@@ -1071,21 +1109,20 @@ fn format_top_processes(system: &System, sort: ProcSort, count: usize) -> Vec<St
         .collect()
 }
 
-fn current_dir_label() -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "?".to_string())
+fn dash_target_path(target: DashDirTarget) -> (String, PathBuf) {
+    match target {
+        DashDirTarget::Cwd => {
+            let p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            let label = p.to_string_lossy().to_string();
+            (label, p)
+        }
+        DashDirTarget::Var => ("/var".to_string(), PathBuf::from("/var")),
+    }
 }
 
-fn scan_cwd_quick(limit: usize) -> Vec<String> {
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(_) => return vec![],
-    };
-
+fn scan_dir_quick(dir: &Path, limit: usize) -> Vec<String> {
     let mut items: Vec<(String, Option<u64>, bool)> = Vec::new(); // (name, size, is_dir)
-    let rd = match std::fs::read_dir(&cwd) {
+    let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return vec![],
     };
