@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -88,6 +89,7 @@ struct AppState {
     dash_top_mem: Vec<String>,
     dash_last_proc_at: Option<Instant>,
     dash_last_fs_at: Option<Instant>,
+    footer_tip_idx: u8,
 }
 
 #[derive(Clone, Default)]
@@ -163,6 +165,7 @@ fn run_app(
 ) -> io::Result<()> {
     // Keep the dashboard cheap: refresh processes + fs scan on a slower cadence.
     let dash_proc_every = Duration::from_secs(3);
+    let mut tip_clock = Instant::now();
 
     loop {
         // Refresh data (keep it cheap; process refresh only when on the processes screen)
@@ -184,6 +187,11 @@ fn run_app(
                 app.dash_last_proc_at = Some(Instant::now());
             }
             *last_tick = Instant::now();
+
+            if tip_clock.elapsed() >= Duration::from_secs(12) {
+                app.footer_tip_idx = app.footer_tip_idx.wrapping_add(1);
+                tip_clock = Instant::now();
+            }
         }
 
         let vm = snapshot(system, disks);
@@ -261,6 +269,11 @@ fn run_app(
                                 app.dash_last_proc_at = Some(Instant::now());
                             }
                             *last_tick = Instant::now();
+
+                            if tip_clock.elapsed() >= Duration::from_secs(12) {
+                                app.footer_tip_idx = app.footer_tip_idx.wrapping_add(1);
+                                tip_clock = Instant::now();
+                            }
                         }
 
                         // Processes + DiskDive share Tab for mode/target.
@@ -321,6 +334,16 @@ fn run_app(
 }
 
 #[derive(Clone)]
+struct DiskRow {
+    fs: String,
+    size: u64,
+    used: u64,
+    avail: u64,
+    use_pct: f64,
+    mount: String,
+}
+
+#[derive(Clone)]
 struct VmSnapshot {
     cpu_usage: f32,
     cpu_cores: usize,
@@ -333,6 +356,8 @@ struct VmSnapshot {
     disk_used: u64,
     disk_total: u64,
     disk_percent: f64,
+
+    disks_table: Vec<DiskRow>,
 }
 
 fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
@@ -357,6 +382,8 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
         None => ("(no disks)".to_string(), 0, 0, 0.0),
     };
 
+    let disks_table = disks_table_filtered(disks, 7);
+
     VmSnapshot {
         cpu_usage,
         cpu_cores,
@@ -368,6 +395,7 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
         disk_used,
         disk_total,
         disk_percent,
+        disks_table,
     }
 }
 
@@ -403,22 +431,44 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
 }
 
 fn render_footer(app: &AppState) -> Paragraph<'static> {
-    let tip = match app.screen {
-        Screen::Dashboard => "Tip: press p for processes, d for disk dive",
-        Screen::Processes => "Tip: Tab toggles sort (CPU/Mem). Use ↑/↓ to scroll",
-        Screen::DiskDive => {
-            "Tip: press s to scan (on-demand). Tab changes target. Results are cached"
-        }
+    let tips_dashboard = [
+        "Tab: toggle dir target (CWD ↔ /var)",
+        "p: processes · d: disk dive",
+        "r: refresh now · ?: help",
+        "Esc: back to dashboard",
+    ];
+
+    let tips_processes = ["Tab: sort CPU ↔ Mem", "↑/↓: scroll · q: quit", "Esc: back"];
+
+    let tips_disk = [
+        "s: scan (on-demand)",
+        "Tab: change target (/var ↔ home ↔ /)",
+        "↑/↓: scroll · Esc: back",
+    ];
+
+    let (label, tip) = match app.screen {
+        Screen::Dashboard => (
+            "Tip",
+            tips_dashboard[(app.footer_tip_idx as usize) % tips_dashboard.len()],
+        ),
+        Screen::Processes => (
+            "Tip",
+            tips_processes[(app.footer_tip_idx as usize) % tips_processes.len()],
+        ),
+        Screen::DiskDive => (
+            "Tip",
+            tips_disk[(app.footer_tip_idx as usize) % tips_disk.len()],
+        ),
     };
 
     Paragraph::new(Line::from(vec![
         Span::styled(
-            "Tip: ",
+            format!("{label}: "),
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(tip.strip_prefix("Tip: ").unwrap_or(tip)),
+        Span::raw(tip),
     ]))
 }
 
@@ -662,35 +712,38 @@ fn render_dashboard(
         .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(disk_inner);
 
-    let disk_lines = vec![
-        Line::from(vec![
-            Span::styled("Mount: ", Style::default().fg(Color::Gray)),
-            Span::styled(vm.disk_label.clone(), Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("Used: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!(
-                    "{} / {} (free {})",
-                    format_bytes(vm.disk_used),
-                    format_bytes(vm.disk_total),
-                    format_bytes(vm.disk_total.saturating_sub(vm.disk_used))
-                ),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Usage: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:.1}%", vm.disk_percent),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-    ];
-    frame.render_widget(
-        Paragraph::new(disk_lines).alignment(Alignment::Left),
-        disk_chunks[0],
-    );
+    let df_rows = vm.disks_table.iter().map(|r| {
+        Row::new(vec![
+            Cell::from(trim_to(&r.fs, 14)),
+            Cell::from(format_bytes(r.size)),
+            Cell::from(format_bytes(r.used)),
+            Cell::from(format_bytes(r.avail)),
+            Cell::from(format!("{:.0}%", r.use_pct)),
+            Cell::from(trim_to(&r.mount, 18)),
+        ])
+    });
+
+    let df = Table::new(
+        df_rows,
+        [
+            Constraint::Length(14),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(5),
+            Constraint::Min(8),
+        ],
+    )
+    .header(
+        Row::new(vec!["FS", "Size", "Used", "Avail", "Use%", "Mount"]).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(Block::default().borders(Borders::NONE));
+
+    frame.render_widget(df, disk_chunks[0]);
 
     let mut dir_lines: Vec<Line> = Vec::new();
     if app.dash_dir_sizes.is_empty() {
@@ -1083,6 +1136,50 @@ fn pick_primary_disk(disks: &Disks) -> Option<&sysinfo::Disk> {
         .iter()
         .find(|d| matches!(d.kind(), DiskKind::HDD | DiskKind::SSD))
         .or_else(|| disks.iter().next())
+}
+
+fn disks_table_filtered(disks: &Disks, limit: usize) -> Vec<DiskRow> {
+    // Filter noisy mounts (tmpfs/udev/ramfs, etc.) and show the real stuff.
+    let mut seen_mounts: HashSet<String> = HashSet::new();
+    let mut rows: Vec<DiskRow> = Vec::new();
+
+    for d in disks.iter() {
+        let mount = d.mount_point().to_string_lossy().to_string();
+        if seen_mounts.contains(&mount) {
+            continue;
+        }
+        seen_mounts.insert(mount.clone());
+
+        let fs = d.name().to_string_lossy().to_string();
+        let total = d.total_space();
+        let avail = d.available_space();
+        let used = total.saturating_sub(avail);
+        let pct = percent(used, total);
+
+        // Heuristic: hide pseudo filesystems by name/mount.
+        // This is intentionally simple; if it hides something useful we can tune.
+        let fs_l = fs.to_lowercase();
+        if fs_l.contains("tmpfs") || fs_l.contains("udev") || fs_l.contains("devtmpfs") {
+            continue;
+        }
+        if mount.starts_with("/run") || mount.starts_with("/dev") || mount.starts_with("/sys") {
+            continue;
+        }
+
+        rows.push(DiskRow {
+            fs,
+            size: total,
+            used,
+            avail,
+            use_pct: pct,
+            mount,
+        });
+    }
+
+    // Biggest first.
+    rows.sort_by_key(|r| Reverse(r.size));
+    rows.truncate(limit);
+    rows
 }
 
 fn format_top_processes(system: &System, sort: ProcSort, count: usize) -> Vec<String> {
