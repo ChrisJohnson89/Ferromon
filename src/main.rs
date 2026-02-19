@@ -68,6 +68,13 @@ struct AppState {
     disk_target: DiskTarget,
     disk_scroll: u16,
     disk_scan: DiskScan,
+
+    // Dashboard caches (quick overview)
+    dash_top_cpu: Vec<String>,
+    dash_top_mem: Vec<String>,
+    dash_cwd_sizes: Vec<String>,
+    dash_last_proc_at: Option<Instant>,
+    dash_last_fs_at: Option<Instant>,
 }
 
 #[derive(Clone, Default)]
@@ -141,11 +148,28 @@ fn run_app(
     tick_rate: Duration,
     last_tick: &mut Instant,
 ) -> io::Result<()> {
+    // Keep the dashboard cheap: refresh processes + fs scan on a slower cadence.
+    let dash_proc_every = Duration::from_secs(3);
+
     loop {
         // Refresh data (keep it cheap; process refresh only when on the processes screen)
         if last_tick.elapsed() >= tick_rate {
-            let refresh_processes = matches!(app.screen, Screen::Processes);
+            let refresh_processes = if matches!(app.screen, Screen::Processes) {
+                true
+            } else if matches!(app.screen, Screen::Dashboard) {
+                // Only refresh process table occasionally; we just need top-N.
+                match app.dash_last_proc_at {
+                    Some(t) => t.elapsed() >= dash_proc_every,
+                    None => true,
+                }
+            } else {
+                false
+            };
             refresh(system, disks, refresh_processes);
+            if matches!(app.screen, Screen::Dashboard) && refresh_processes {
+                // reuse this timestamp for both proc+fs scan cadence
+                app.dash_last_proc_at = Some(Instant::now());
+            }
             *last_tick = Instant::now();
         }
 
@@ -168,7 +192,7 @@ fn run_app(
 
             // Main
             match app.screen {
-                Screen::Dashboard => render_dashboard(frame, rows[1], &vm),
+                Screen::Dashboard => render_dashboard(frame, rows[1], &vm, app, system),
                 Screen::Processes => render_processes(frame, rows[1], app, system),
                 Screen::DiskDive => render_disk_dive(frame, rows[1], app),
             }
@@ -207,8 +231,22 @@ fn run_app(
                         }
                         KeyCode::Char('r') => {
                             // manual refresh, including processes if currently viewing them
-                            let refresh_processes = matches!(app.screen, Screen::Processes);
+                            let refresh_processes = if matches!(app.screen, Screen::Processes) {
+                                true
+                            } else if matches!(app.screen, Screen::Dashboard) {
+                                // Only refresh process table occasionally; we just need top-N.
+                                match app.dash_last_proc_at {
+                                    Some(t) => t.elapsed() >= dash_proc_every,
+                                    None => true,
+                                }
+                            } else {
+                                false
+                            };
                             refresh(system, disks, refresh_processes);
+                            if matches!(app.screen, Screen::Dashboard) && refresh_processes {
+                                // reuse this timestamp for both proc+fs scan cadence
+                                app.dash_last_proc_at = Some(Instant::now());
+                            }
                             *last_tick = Instant::now();
                         }
 
@@ -398,7 +436,13 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
+fn render_dashboard(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    vm: &VmSnapshot,
+    app: &mut AppState,
+    system: &System,
+) {
     let panels = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -407,6 +451,21 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
             Constraint::Percentage(33),
         ])
         .split(area);
+
+    // --- dashboard quick-overview cache ---
+    // Keep this screen cheap: do tiny scans occasionally, not every frame.
+    let now = Instant::now();
+    let need_fs = match app.dash_last_fs_at {
+        Some(t) => t.elapsed() >= Duration::from_secs(5),
+        None => true,
+    };
+
+    if need_fs {
+        app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 3);
+        app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 3);
+        app.dash_cwd_sizes = scan_cwd_quick(6);
+        app.dash_last_fs_at = Some(now);
+    }
 
     // CPU
     let cpu_block = Block::default()
@@ -418,7 +477,11 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
     let cpu_inner = cpu_block.inner(panels[0]);
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(6),
+            Constraint::Min(0),
+        ])
         .split(cpu_inner);
 
     let cpu_lines = vec![
@@ -450,7 +513,35 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
     let cpu_gauge = Gauge::default()
         .gauge_style(Style::default().fg(color_for_pct(vm.cpu_usage as f64)))
         .ratio(((vm.cpu_usage as f64) / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(cpu_gauge, cpu_chunks[1]);
+    frame.render_widget(cpu_gauge, cpu_chunks[2]);
+
+    let cpu_bottom = if app.dash_top_cpu.is_empty() {
+        vec![Line::from(Span::styled(
+            "Top CPU: (no data)",
+            Style::default().fg(Color::Gray),
+        ))]
+    } else {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                "Top CPU",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": "),
+        ])];
+        for (i, row) in app.dash_top_cpu.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Gray)),
+                Span::raw(row.clone()),
+            ]));
+        }
+        lines
+    };
+    frame.render_widget(
+        Paragraph::new(cpu_bottom).alignment(Alignment::Left),
+        cpu_chunks[1],
+    );
 
     // Memory
     let memory_block = Block::default()
@@ -462,7 +553,11 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
     let memory_inner = memory_block.inner(panels[1]);
     let memory_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(6),
+            Constraint::Min(0),
+        ])
         .split(memory_inner);
 
     let memory_lines = vec![
@@ -491,13 +586,49 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
     let memory_gauge = Gauge::default()
         .gauge_style(Style::default().fg(color_for_pct(vm.memory_percent)))
         .ratio((vm.memory_percent / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(memory_gauge, memory_chunks[1]);
+    frame.render_widget(memory_gauge, memory_chunks[2]);
+
+    let mem_bottom = if app.dash_top_mem.is_empty() {
+        vec![Line::from(Span::styled(
+            "Top MEM: (no data)",
+            Style::default().fg(Color::Gray),
+        ))]
+    } else {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                "Top MEM",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": "),
+        ])];
+        for (i, row) in app.dash_top_mem.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Gray)),
+                Span::raw(row.clone()),
+            ]));
+        }
+        lines
+    };
+    frame.render_widget(
+        Paragraph::new(mem_bottom).alignment(Alignment::Left),
+        memory_chunks[1],
+    );
 
     // Disk
     let disk_block = Block::default()
         .title("Disk")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
+    frame.render_widget(disk_block.clone(), panels[2]);
+
+    let disk_inner = disk_block.inner(panels[2]);
+    let disk_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(disk_inner);
+
     let disk_lines = vec![
         Line::from(vec![
             Span::styled("Mount: ", Style::default().fg(Color::Gray)),
@@ -524,10 +655,32 @@ fn render_dashboard(frame: &mut ratatui::Frame, area: Rect, vm: &VmSnapshot) {
         ]),
     ];
     frame.render_widget(
-        Paragraph::new(disk_lines)
-            .block(disk_block)
-            .alignment(Alignment::Left),
-        panels[2],
+        Paragraph::new(disk_lines).alignment(Alignment::Left),
+        disk_chunks[0],
+    );
+
+    let mut cwd_lines: Vec<Line> = Vec::new();
+    cwd_lines.push(Line::from(vec![Span::styled(
+        format!("CWD: {}", current_dir_label()),
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    if app.dash_cwd_sizes.is_empty() {
+        cwd_lines.push(Line::from(Span::styled(
+            "(no entries)",
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        for row in app.dash_cwd_sizes.iter() {
+            cwd_lines.push(Line::from(Span::raw(row.clone())));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(cwd_lines).alignment(Alignment::Left),
+        disk_chunks[1],
     );
 }
 
@@ -892,6 +1045,87 @@ fn pick_primary_disk(disks: &Disks) -> Option<&sysinfo::Disk> {
         .iter()
         .find(|d| matches!(d.kind(), DiskKind::HDD | DiskKind::SSD))
         .or_else(|| disks.iter().next())
+}
+
+fn format_top_processes(system: &System, sort: ProcSort, count: usize) -> Vec<String> {
+    let mut procs: Vec<ProcRow> = system
+        .processes()
+        .iter()
+        .map(|(pid, p)| ProcRow::from_process(*pid, p))
+        .collect();
+
+    match sort {
+        ProcSort::Cpu => procs.sort_by_key(|p| Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))),
+        ProcSort::Mem => procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))),
+    }
+
+    procs
+        .into_iter()
+        .take(count)
+        .map(|p| {
+            let cpu = format!("{:.1}%", p.cpu_x10 as f64 / 10.0);
+            let mem = format_bytes(p.mem_bytes);
+            // Keep it short; this is dashboard real estate.
+            format!("{}  {}  {}", trim_to(&p.name, 18), cpu, mem)
+        })
+        .collect()
+}
+
+fn current_dir_label() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn scan_cwd_quick(limit: usize) -> Vec<String> {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+
+    let mut items: Vec<(String, Option<u64>, bool)> = Vec::new(); // (name, size, is_dir)
+    let rd = match std::fs::read_dir(&cwd) {
+        Ok(rd) => rd,
+        Err(_) => return vec![],
+    };
+
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let md = match e.metadata() {
+            Ok(md) => md,
+            Err(_) => continue,
+        };
+        let is_dir = md.is_dir();
+        let size = if md.is_file() { Some(md.len()) } else { None };
+        items.push((name, size, is_dir));
+    }
+
+    // Sort: biggest files first; then dirs; stable by name.
+    items.sort_by_key(|(name, size, is_dir)| {
+        let dir_rank = if *is_dir { 1 } else { 0 };
+        (dir_rank, Reverse(size.unwrap_or(0)), name.clone())
+    });
+
+    let mut out: Vec<String> = Vec::new();
+    for (name, size, is_dir) in items.into_iter().take(limit) {
+        if is_dir {
+            out.push(format!("{}/  (dir)", name));
+        } else {
+            out.push(format!("{}  {}", name, format_bytes(size.unwrap_or(0))));
+        }
+    }
+    out
+}
+
+fn trim_to(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max <= 1 {
+        "…".to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
