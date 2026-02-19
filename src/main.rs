@@ -17,7 +17,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Wrap};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
-use sysinfo::{DiskKind, Disks, Process, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,11 +352,6 @@ struct VmSnapshot {
     used_memory: u64,
     memory_percent: f64,
 
-    disk_label: String,
-    disk_used: u64,
-    disk_total: u64,
-    disk_percent: f64,
-
     disks_table: Vec<DiskRow>,
 }
 
@@ -370,18 +365,6 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
     let used_memory = system.used_memory();
     let memory_percent = percent(used_memory, total_memory);
 
-    let disk = pick_primary_disk(disks);
-    let (disk_label, disk_used, disk_total, disk_percent) = match disk {
-        Some(d) => {
-            let total = d.total_space();
-            let avail = d.available_space();
-            let used = total.saturating_sub(avail);
-            let pct = percent(used, total);
-            (format!("{}", d.mount_point().display()), used, total, pct)
-        }
-        None => ("(no disks)".to_string(), 0, 0, 0.0),
-    };
-
     let disks_table = disks_table_filtered(disks, 7);
 
     VmSnapshot {
@@ -391,10 +374,6 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
         total_memory,
         used_memory,
         memory_percent,
-        disk_label,
-        disk_used,
-        disk_total,
-        disk_percent,
         disks_table,
     }
 }
@@ -1129,13 +1108,6 @@ fn color_for_pct(pct: f64) -> Color {
     } else {
         Color::Green
     }
-}
-
-fn pick_primary_disk(disks: &Disks) -> Option<&sysinfo::Disk> {
-    disks
-        .iter()
-        .find(|d| matches!(d.kind(), DiskKind::HDD | DiskKind::SSD))
-        .or_else(|| disks.iter().next())
 }
 
 fn disks_table_filtered(disks: &Disks, limit: usize) -> Vec<DiskRow> {

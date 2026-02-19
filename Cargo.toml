@@ -1,6 +1,6 @@
 [package]
 name = "ferromon"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "Lightweight interactive Rust TUI for CPU/memory/disk monitoring"
 license = "MIT"
