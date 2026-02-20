@@ -1,50 +1,57 @@
 # Ferromon
 
-A lightweight, interactive **Rust TUI** for quick host health checks (CPU / memory / disk) — built with **ratatui + crossterm + sysinfo**.
+A fast, interactive **Rust TUI** for quick host checks.
+
+Built with **ratatui + crossterm + sysinfo**.
+
+## Why
+You want a “what’s going on with this box?” view in ~2 seconds:
+- CPU + memory pressure
+- top processes
+- disk usage (df-style)
+- one-key deeper dives when needed
 
 ## Features
-- Live **CPU** gauge
-- **Memory** usage (used/total + percent)
-- **Disk** usage (used/total + percent) for your primary disk
-- **Processes view**: top CPU / top memory
-- **Disk dive** (on-demand): find biggest directories without slowing the dashboard
-- Fast refresh loop (default: 500ms)
+- Dashboard: CPU + Memory gauges + **top processes**
+- Disk panel: compact **df-style** overview (filtered to “real” mounts)
+- Processes view (`p`): top CPU/mem with scroll
+- Disk dive (`d`): on-demand directory sizing (kept out of the hot loop)
+- Refresh rate control via CLI flag
 
-## Controls
-- `q` — quit
-- `?` — help
-- `Esc` — back to dashboard
-- `p` — processes view
-- `d` — disk dive
-- `r` — refresh now
+## Install
+Rust required.
 
-### Screen-specific
-- Processes: `Tab` toggles sort (CPU ↔ Mem)
-- Disk dive: `Tab` changes scan target (/var ↔ home ↔ /), `s` starts scan
-
-## Install (Rust required)
 ```bash
 cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked
 ```
 
-Then run:
+Run:
 ```bash
 ferro
 ```
 
-## Dev run
+## CLI
 ```bash
-cargo run
+ferro --help
+ferro --version
+ferro --tick-ms 750
 ```
 
-## Notes / roadmap
-- [ ] Per-core CPU view
-- [ ] Threshold coloring / alerts
-- [ ] Configurable refresh rate + CLI flags
-- [ ] Export snapshot to JSON
-- [ ] Process details (cmdline/user) + kill action
-- [ ] Disk dive drill-down (enter) + ignore patterns
+## Keys
+- `q` quit
+- `?` help
+- `Esc` back to dashboard
+- `p` processes
+- `d` disk dive
+- `r` refresh now
 
----
+### Contextual
+- Dashboard: `Tab` toggles dir target (CWD ↔ /var)
+- Processes: `Tab` toggles sort (CPU ↔ Mem)
+- Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans
 
-Built as a “usable first” tool: minimal, responsive, and easy to extend.
+## Screenshot
+*(add one)*
+
+## License
+MIT.

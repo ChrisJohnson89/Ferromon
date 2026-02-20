@@ -20,6 +20,8 @@ use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Dashboard,
@@ -98,6 +100,82 @@ struct DiskScan {
 }
 
 #[derive(Default)]
+struct Args {
+    tick_ms: u64,
+    show_help: bool,
+    show_version: bool,
+}
+
+fn parse_args() -> Args {
+    let mut tick_ms: u64 = 500;
+    let mut show_help = false;
+    let mut show_version = false;
+
+    let argv: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        match a {
+            "-h" | "--help" => {
+                show_help = true;
+            }
+            "-V" | "--version" => {
+                show_version = true;
+            }
+            "--tick-ms" => {
+                if i + 1 >= argv.len() {
+                    show_help = true;
+                } else if let Ok(v) = argv[i + 1].parse::<u64>() {
+                    tick_ms = v.max(50).min(5000);
+                    i += 1;
+                } else {
+                    show_help = true;
+                }
+            }
+            _ if a.starts_with("--tick-ms=") => {
+                if let Some(v) = a.split('=').nth(1) {
+                    if let Ok(v) = v.parse::<u64>() {
+                        tick_ms = v.max(50).min(5000);
+                    } else {
+                        show_help = true;
+                    }
+                }
+            }
+            _ => {
+                // unknown flag
+                show_help = true;
+            }
+        }
+        i += 1;
+    }
+
+    Args {
+        tick_ms,
+        show_help,
+        show_version,
+    }
+}
+
+fn print_cli_help() {
+    println!("ferro {VERSION}");
+    println!(
+        "
+USAGE:
+  ferro [--tick-ms <ms>]
+"
+    );
+    println!("OPTIONS:");
+    println!("  --tick-ms <ms>   UI refresh tick (50..5000). Default: 500");
+    println!("  -h, --help       Show help");
+    println!("  -V, --version    Show version");
+    println!(
+        "
+KEYS (in-app):
+  q quit · ? help · Esc back · p processes · d disk dive · r refresh"
+    );
+}
+
+#[derive(Default)]
 struct DiskScanState {
     running: bool,
     last_target: Option<PathBuf>,
@@ -109,6 +187,16 @@ struct DiskScanState {
 }
 
 fn main() -> io::Result<()> {
+    let args = parse_args();
+    if args.show_version {
+        println!("{VERSION}");
+        return Ok(());
+    }
+    if args.show_help {
+        print_cli_help();
+        return Ok(());
+    }
+
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -129,7 +217,7 @@ fn main() -> io::Result<()> {
 
     refresh(&mut system, &mut disks, true);
 
-    let tick_rate = Duration::from_millis(500);
+    let tick_rate = Duration::from_millis(args.tick_ms);
     let mut last_tick = Instant::now();
 
     let mut app = AppState::default();
@@ -153,6 +241,24 @@ fn main() -> io::Result<()> {
     terminal.show_cursor()?;
 
     res
+}
+
+fn render_too_small(frame: &mut ratatui::Frame, area: Rect) {
+    let msg = vec![
+        Line::from("Ferromon"),
+        Line::from(""),
+        Line::from("Terminal too small."),
+        Line::from("Resize and try again."),
+        Line::from(""),
+        Line::from("Tip: you can also run: ferro --help"),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(msg)
+            .alignment(Alignment::Center)
+            .block(Block::default().title("Ferromon").borders(Borders::ALL)),
+        area,
+    );
 }
 
 fn run_app(
@@ -210,6 +316,13 @@ fn run_app(
 
             // Header
             frame.render_widget(render_header(app), rows[0]);
+
+            // If terminal is too small, render a friendly message instead of a broken layout.
+            if rows[1].width < 80 || rows[1].height < 14 {
+                render_too_small(frame, rows[1]);
+                // Footer/help still renders below.
+                return;
+            }
 
             // Main
             match app.screen {
