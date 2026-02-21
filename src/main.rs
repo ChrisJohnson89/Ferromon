@@ -22,54 +22,34 @@ use walkdir::WalkDir;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    #[default]
     Dashboard,
     Processes,
     DiskDive,
 }
 
-impl Default for Screen {
-    fn default() -> Self {
-        Screen::Dashboard
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum ProcSort {
+    #[default]
     Cpu,
     Mem,
 }
 
-impl Default for ProcSort {
-    fn default() -> Self {
-        ProcSort::Cpu
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum DiskTarget {
+    #[default]
     Var,
     Home,
     Root,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum DashDirTarget {
+    #[default]
     Cwd,
     Var,
-}
-
-impl Default for DashDirTarget {
-    fn default() -> Self {
-        DashDirTarget::Cwd
-    }
-}
-
-impl Default for DiskTarget {
-    fn default() -> Self {
-        DiskTarget::Var
-    }
 }
 
 #[derive(Default)]
@@ -102,12 +82,14 @@ struct DiskScan {
 #[derive(Default)]
 struct Args {
     tick_ms: u64,
+    no_mouse: bool,
     show_help: bool,
     show_version: bool,
 }
 
 fn parse_args() -> Args {
     let mut tick_ms: u64 = 500;
+    let mut no_mouse = false;
     let mut show_help = false;
     let mut show_version = false;
 
@@ -122,11 +104,14 @@ fn parse_args() -> Args {
             "-V" | "--version" => {
                 show_version = true;
             }
+            "--no-mouse" => {
+                no_mouse = true;
+            }
             "--tick-ms" => {
                 if i + 1 >= argv.len() {
                     show_help = true;
                 } else if let Ok(v) = argv[i + 1].parse::<u64>() {
-                    tick_ms = v.max(50).min(5000);
+                    tick_ms = v.clamp(50, 5000);
                     i += 1;
                 } else {
                     show_help = true;
@@ -135,7 +120,7 @@ fn parse_args() -> Args {
             _ if a.starts_with("--tick-ms=") => {
                 if let Some(v) = a.split('=').nth(1) {
                     if let Ok(v) = v.parse::<u64>() {
-                        tick_ms = v.max(50).min(5000);
+                        tick_ms = v.clamp(50, 5000);
                     } else {
                         show_help = true;
                     }
@@ -151,6 +136,7 @@ fn parse_args() -> Args {
 
     Args {
         tick_ms,
+        no_mouse,
         show_help,
         show_version,
     }
@@ -166,6 +152,7 @@ USAGE:
     );
     println!("OPTIONS:");
     println!("  --tick-ms <ms>   UI refresh tick (50..5000). Default: 500");
+    println!("  --no-mouse       Disable mouse capture (useful in tmux/SSH)");
     println!("  -h, --help       Show help");
     println!("  -V, --version    Show version");
     println!(
@@ -200,7 +187,11 @@ fn main() -> io::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if args.no_mouse {
+        execute!(stdout, EnterAlternateScreen)?;
+    } else {
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    }
     terminal::enable_raw_mode()?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -233,11 +224,15 @@ fn main() -> io::Result<()> {
 
     // Always restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    if args.no_mouse {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    } else {
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+    }
     terminal.show_cursor()?;
 
     res
@@ -341,104 +336,101 @@ fn run_app(
 
         // Input
         if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    // Avoid key-repeat spam on some terminals
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('?') => app.show_help = !app.show_help,
-                        KeyCode::Esc => {
-                            app.show_help = false;
-                            app.screen = Screen::Dashboard;
-                        }
-                        KeyCode::Char('p') => {
-                            app.show_help = false;
-                            app.screen = Screen::Processes;
-                        }
-                        KeyCode::Char('d') => {
-                            app.show_help = false;
-                            app.screen = Screen::DiskDive;
-                        }
-                        KeyCode::Char('r') => {
-                            // manual refresh, including processes if currently viewing them
-                            let refresh_processes = if matches!(app.screen, Screen::Processes) {
-                                true
-                            } else if matches!(app.screen, Screen::Dashboard) {
-                                // Only refresh process table occasionally; we just need top-N.
-                                match app.dash_last_proc_at {
-                                    Some(t) => t.elapsed() >= dash_proc_every,
-                                    None => true,
-                                }
-                            } else {
-                                false
-                            };
-                            refresh(system, disks, refresh_processes);
-                            if matches!(app.screen, Screen::Dashboard) && refresh_processes {
-                                // reuse this timestamp for both proc+fs scan cadence
-                                app.dash_last_proc_at = Some(Instant::now());
-                            }
-                            *last_tick = Instant::now();
-
-                            if tip_clock.elapsed() >= Duration::from_secs(12) {
-                                app.footer_tip_idx = app.footer_tip_idx.wrapping_add(1);
-                                tip_clock = Instant::now();
-                            }
-                        }
-
-                        // Processes + DiskDive share Tab for mode/target.
-                        KeyCode::Up => {
-                            if matches!(app.screen, Screen::Processes) {
-                                app.proc_scroll = app.proc_scroll.saturating_sub(1);
-                            } else if matches!(app.screen, Screen::DiskDive) {
-                                app.disk_scroll = app.disk_scroll.saturating_sub(1);
-                            }
-                        }
-                        KeyCode::Down => {
-                            if matches!(app.screen, Screen::Processes) {
-                                app.proc_scroll = app.proc_scroll.saturating_add(1);
-                            } else if matches!(app.screen, Screen::DiskDive) {
-                                app.disk_scroll = app.disk_scroll.saturating_add(1);
-                            }
-                        }
-
-                        // Tab is contextual.
-                        KeyCode::Tab => {
-                            if matches!(app.screen, Screen::Dashboard) {
-                                app.dash_dir_target = match app.dash_dir_target {
-                                    DashDirTarget::Cwd => DashDirTarget::Var,
-                                    DashDirTarget::Var => DashDirTarget::Cwd,
-                                };
-                                // Force refresh of quick scan.
-                                app.dash_last_fs_at = None;
-                            } else if matches!(app.screen, Screen::DiskDive) {
-                                app.disk_target = match app.disk_target {
-                                    DiskTarget::Var => DiskTarget::Home,
-                                    DiskTarget::Home => DiskTarget::Root,
-                                    DiskTarget::Root => DiskTarget::Var,
-                                };
-                                app.disk_scroll = 0;
-                            } else if matches!(app.screen, Screen::Processes) {
-                                app.proc_sort = match app.proc_sort {
-                                    ProcSort::Cpu => ProcSort::Mem,
-                                    ProcSort::Mem => ProcSort::Cpu,
-                                };
-                                app.proc_scroll = 0;
-                            }
-                        }
-                        KeyCode::Char('s') => {
-                            if matches!(app.screen, Screen::DiskDive) {
-                                start_disk_scan(app);
-                            }
-                        }
-
-                        _ => {}
-                    }
+            if let Event::Key(key) = event::read()? {
+                // Avoid key-repeat spam on some terminals
+                if key.kind != KeyEventKind::Press {
+                    continue;
                 }
-                _ => {}
+
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('?') => app.show_help = !app.show_help,
+                    KeyCode::Esc => {
+                        app.show_help = false;
+                        app.screen = Screen::Dashboard;
+                    }
+                    KeyCode::Char('p') => {
+                        app.show_help = false;
+                        app.screen = Screen::Processes;
+                    }
+                    KeyCode::Char('d') => {
+                        app.show_help = false;
+                        app.screen = Screen::DiskDive;
+                    }
+                    KeyCode::Char('r') => {
+                        // manual refresh, including processes if currently viewing them
+                        let refresh_processes = if matches!(app.screen, Screen::Processes) {
+                            true
+                        } else if matches!(app.screen, Screen::Dashboard) {
+                            // Only refresh process table occasionally; we just need top-N.
+                            match app.dash_last_proc_at {
+                                Some(t) => t.elapsed() >= dash_proc_every,
+                                None => true,
+                            }
+                        } else {
+                            false
+                        };
+                        refresh(system, disks, refresh_processes);
+                        if matches!(app.screen, Screen::Dashboard) && refresh_processes {
+                            // reuse this timestamp for both proc+fs scan cadence
+                            app.dash_last_proc_at = Some(Instant::now());
+                        }
+                        *last_tick = Instant::now();
+
+                        if tip_clock.elapsed() >= Duration::from_secs(12) {
+                            app.footer_tip_idx = app.footer_tip_idx.wrapping_add(1);
+                            tip_clock = Instant::now();
+                        }
+                    }
+
+                    // Processes + DiskDive share Tab for mode/target.
+                    KeyCode::Up => {
+                        if matches!(app.screen, Screen::Processes) {
+                            app.proc_scroll = app.proc_scroll.saturating_sub(1);
+                        } else if matches!(app.screen, Screen::DiskDive) {
+                            app.disk_scroll = app.disk_scroll.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if matches!(app.screen, Screen::Processes) {
+                            app.proc_scroll = app.proc_scroll.saturating_add(1);
+                        } else if matches!(app.screen, Screen::DiskDive) {
+                            app.disk_scroll = app.disk_scroll.saturating_add(1);
+                        }
+                    }
+
+                    // Tab is contextual.
+                    KeyCode::Tab => {
+                        if matches!(app.screen, Screen::Dashboard) {
+                            app.dash_dir_target = match app.dash_dir_target {
+                                DashDirTarget::Cwd => DashDirTarget::Var,
+                                DashDirTarget::Var => DashDirTarget::Cwd,
+                            };
+                            // Force refresh of quick scan.
+                            app.dash_last_fs_at = None;
+                        } else if matches!(app.screen, Screen::DiskDive) {
+                            app.disk_target = match app.disk_target {
+                                DiskTarget::Var => DiskTarget::Home,
+                                DiskTarget::Home => DiskTarget::Root,
+                                DiskTarget::Root => DiskTarget::Var,
+                            };
+                            app.disk_scroll = 0;
+                        } else if matches!(app.screen, Screen::Processes) {
+                            app.proc_sort = match app.proc_sort {
+                                ProcSort::Cpu => ProcSort::Mem,
+                                ProcSort::Mem => ProcSort::Cpu,
+                            };
+                            app.proc_scroll = 0;
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if matches!(app.screen, Screen::DiskDive) {
+                            start_disk_scan(app);
+                        }
+                    }
+
+                    _ => {}
+                }
             }
         }
     }
