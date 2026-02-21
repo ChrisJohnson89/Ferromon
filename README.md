@@ -47,7 +47,7 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - `r` refresh now
 
 ### Contextual
-- Dashboard: `Tab` toggles dir target (CWD ↔ /var)
+- Dashboard: `Tab` toggles dir target (CWD ↔ /var), `f` toggles mount filter (filtered ↔ all)
 - Processes: `Tab` toggles sort (CPU ↔ Mem)
 - Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans
 
