@@ -52,7 +52,6 @@ enum DashDirTarget {
     Var,
 }
 
-#[derive(Default)]
 struct AppState {
     screen: Screen,
     show_help: bool,
@@ -73,6 +72,30 @@ struct AppState {
     dash_last_fs_at: Option<Instant>,
     dash_show_all_mounts: bool,
     footer_tip_idx: u8,
+    tick_ms: u64,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            screen: Screen::default(),
+            show_help: false,
+            proc_sort: ProcSort::default(),
+            proc_scroll: 0,
+            disk_target: DiskTarget::default(),
+            disk_scroll: 0,
+            disk_scan: DiskScan::default(),
+            dash_dir_target: DashDirTarget::default(),
+            dash_dir_sizes: Vec::new(),
+            dash_top_cpu: Vec::new(),
+            dash_top_mem: Vec::new(),
+            dash_last_proc_at: None,
+            dash_last_fs_at: None,
+            dash_show_all_mounts: false,
+            footer_tip_idx: 0,
+            tick_ms: 500,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -112,7 +135,14 @@ fn parse_args() -> Args {
                 if i + 1 >= argv.len() {
                     show_help = true;
                 } else if let Ok(v) = argv[i + 1].parse::<u64>() {
-                    tick_ms = v.clamp(50, 5000);
+                    let clamped = v.clamp(50, 5000);
+                    if v != clamped {
+                        eprintln!(
+                            "Warning: --tick-ms {} is out of range, clamped to {}",
+                            v, clamped
+                        );
+                    }
+                    tick_ms = clamped;
                     i += 1;
                 } else {
                     show_help = true;
@@ -121,7 +151,14 @@ fn parse_args() -> Args {
             _ if a.starts_with("--tick-ms=") => {
                 if let Some(v) = a.split('=').nth(1) {
                     if let Ok(v) = v.parse::<u64>() {
-                        tick_ms = v.clamp(50, 5000);
+                        let clamped = v.clamp(50, 5000);
+                        if v != clamped {
+                            eprintln!(
+                                "Warning: --tick-ms {} is out of range, clamped to {}",
+                                v, clamped
+                            );
+                        }
+                        tick_ms = clamped;
                     } else {
                         show_help = true;
                     }
@@ -212,7 +249,10 @@ fn main() -> io::Result<()> {
     let tick_rate = Duration::from_millis(args.tick_ms);
     let mut last_tick = Instant::now();
 
-    let mut app = AppState::default();
+    let mut app = AppState {
+        tick_ms: args.tick_ms,
+        ..Default::default()
+    };
 
     let res = run_app(
         &mut terminal,
@@ -548,17 +588,21 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
     ];
 
     let (label, tip) = match app.screen {
-        Screen::Dashboard => (
-            "Tip",
-            tips_dashboard[(app.footer_tip_idx as usize) % tips_dashboard.len()],
-        ),
+        Screen::Dashboard => {
+            let idx = app.footer_tip_idx as usize % (tips_dashboard.len() + 1);
+            if idx == tips_dashboard.len() {
+                ("Info", format!("Refresh rate: {}ms", app.tick_ms))
+            } else {
+                ("Tip", tips_dashboard[idx].to_string())
+            }
+        }
         Screen::Processes => (
             "Tip",
-            tips_processes[(app.footer_tip_idx as usize) % tips_processes.len()],
+            tips_processes[(app.footer_tip_idx as usize) % tips_processes.len()].to_string(),
         ),
         Screen::DiskDive => (
             "Tip",
-            tips_disk[(app.footer_tip_idx as usize) % tips_disk.len()],
+            tips_disk[(app.footer_tip_idx as usize) % tips_disk.len()].to_string(),
         ),
     };
 
