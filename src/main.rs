@@ -71,6 +71,7 @@ struct AppState {
     dash_top_mem: Vec<String>,
     dash_last_proc_at: Option<Instant>,
     dash_last_fs_at: Option<Instant>,
+    dash_show_all_mounts: bool,
     footer_tip_idx: u8,
 }
 
@@ -295,7 +296,7 @@ fn run_app(
             }
         }
 
-        let vm = snapshot(system, disks);
+        let vm = snapshot(system, disks, app.dash_show_all_mounts);
 
         terminal.draw(|frame| {
             let size = frame.size();
@@ -428,6 +429,11 @@ fn run_app(
                             start_disk_scan(app);
                         }
                     }
+                    KeyCode::Char('f') => {
+                        if matches!(app.screen, Screen::Dashboard) {
+                            app.dash_show_all_mounts = !app.dash_show_all_mounts;
+                        }
+                    }
 
                     _ => {}
                 }
@@ -459,7 +465,7 @@ struct VmSnapshot {
     disks_table: Vec<DiskRow>,
 }
 
-fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
+fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot {
     let cpu_usage = system.global_cpu_info().cpu_usage();
     let cpu_cores = system.cpus().len();
     // sysinfo reports memory in bytes
@@ -467,7 +473,7 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
     let used_memory = system.used_memory();
     let memory_percent = percent(used_memory, total_memory);
 
-    let disks_table = disks_table_filtered(disks, 7);
+    let disks_table = disks_table_filtered(disks, 7, show_all_mounts);
 
     VmSnapshot {
         cpu_usage,
@@ -481,7 +487,7 @@ fn snapshot(system: &System, disks: &Disks) -> VmSnapshot {
 
 fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
-        Screen::Dashboard => ("Dashboard", "p: processes  d: disk  Tab: dir"),
+        Screen::Dashboard => ("Dashboard", "p: processes  d: disk  f: filter  Tab: dir"),
         Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
         Screen::DiskDive => ("Disk dive", "s: scan  Tab: target  Esc: back"),
     };
@@ -513,6 +519,7 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
 fn render_footer(app: &AppState) -> Paragraph<'static> {
     let tips_dashboard = [
         "Tab: toggle dir target (CWD ↔ /var)",
+        "f: toggle mount filter (filtered ↔ all)",
         "p: processes · d: disk dive",
         "r: refresh now · ?: help",
         "Esc: back to dashboard",
@@ -567,6 +574,7 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
             lines.push(Line::from("Dashboard:"));
             lines.push(Line::from("  p — processes"));
             lines.push(Line::from("  d — disk dive"));
+            lines.push(Line::from("  f — toggle mount filter (filtered ↔ all)"));
             lines.push(Line::from("  Tab — toggle dir target (CWD ↔ /var)"));
         }
         Screen::Processes => {
@@ -773,8 +781,13 @@ fn render_dashboard(
     );
 
     // Disk
+    let disk_title = if app.dash_show_all_mounts {
+        "Disk (all mounts)"
+    } else {
+        "Disk (filtered)"
+    };
     let disk_block = Block::default()
-        .title("Disk")
+        .title(disk_title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
     frame.render_widget(disk_block.clone(), panels[2]);
@@ -1204,7 +1217,7 @@ fn color_for_pct(pct: f64) -> Color {
     }
 }
 
-fn disks_table_filtered(disks: &Disks, limit: usize) -> Vec<DiskRow> {
+fn disks_table_filtered(disks: &Disks, limit: usize, show_all: bool) -> Vec<DiskRow> {
     // Filter noisy mounts (tmpfs/udev/ramfs, etc.) and show the real stuff.
     let mut seen_mounts: HashSet<String> = HashSet::new();
     let mut rows: Vec<DiskRow> = Vec::new();
@@ -1222,14 +1235,16 @@ fn disks_table_filtered(disks: &Disks, limit: usize) -> Vec<DiskRow> {
         let used = total.saturating_sub(avail);
         let pct = percent(used, total);
 
-        // Heuristic: hide pseudo filesystems by name/mount.
+        // Heuristic: hide pseudo filesystems by name/mount (unless show_all is true).
         // This is intentionally simple; if it hides something useful we can tune.
-        let fs_l = fs.to_lowercase();
-        if fs_l.contains("tmpfs") || fs_l.contains("udev") || fs_l.contains("devtmpfs") {
-            continue;
-        }
-        if mount.starts_with("/run") || mount.starts_with("/dev") || mount.starts_with("/sys") {
-            continue;
+        if !show_all {
+            let fs_l = fs.to_lowercase();
+            if fs_l.contains("tmpfs") || fs_l.contains("udev") || fs_l.contains("devtmpfs") {
+                continue;
+            }
+            if mount.starts_with("/run") || mount.starts_with("/dev") || mount.starts_with("/sys") {
+                continue;
+            }
         }
 
         rows.push(DiskRow {
