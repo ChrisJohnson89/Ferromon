@@ -19,7 +19,7 @@ You want a “what’s going on with this box?” view in ~2 seconds:
 - Refresh rate control via CLI flag
 
 ## Install
-Rust required.
+Rust required. Minimum terminal size: **80x14**.
 
 ```bash
 cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked
