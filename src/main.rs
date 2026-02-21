@@ -858,24 +858,24 @@ fn render_dashboard(
 
     let df_rows = vm.disks_table.iter().map(|r| {
         Row::new(vec![
-            Cell::from(trim_to(&r.fs, 14)),
+            Cell::from(trim_to(&r.fs, 15)),
             Cell::from(format_bytes(r.size)),
             Cell::from(format_bytes(r.used)),
             Cell::from(format_bytes(r.avail)),
             Cell::from(format!("{:.0}%", r.use_pct)),
-            Cell::from(trim_to(&r.mount, 18)),
+            Cell::from(trim_to(&r.mount, 20)),
         ])
     });
 
     let df = Table::new(
         df_rows,
         [
-            Constraint::Length(14),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(5),
-            Constraint::Min(8),
+            Constraint::Length(15),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Min(10),
         ],
     )
     .header(
@@ -956,10 +956,13 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
 
     let slice = &procs[offset..procs.len().min(offset + visible.max(1))];
 
+    // Calculate available width for process name column
+    let name_width = ((inner.width.saturating_sub(8 + 10 + 14 + 4)) as usize).max(20);
+
     let rows = slice.iter().map(|p| {
         Row::new(vec![
             Cell::from(p.pid.to_string()),
-            Cell::from(p.name.clone()),
+            Cell::from(trim_to(&p.name, name_width)),
             Cell::from(format!("{:.1}%", p.cpu_x10 as f64 / 10.0)),
             Cell::from(format_bytes(p.mem_bytes)),
         ])
@@ -969,7 +972,7 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
         rows,
         [
             Constraint::Length(8),
-            Constraint::Percentage(55),
+            Constraint::Min(20),
             Constraint::Length(10),
             Constraint::Length(14),
         ],
