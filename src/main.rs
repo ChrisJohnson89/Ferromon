@@ -240,10 +240,24 @@ fn main() -> io::Result<()> {
 }
 
 fn render_too_small(frame: &mut ratatui::Frame, area: Rect) {
+    let size = frame.size();
     let msg = vec![
         Line::from("Ferromon"),
         Line::from(""),
         Line::from("Terminal too small."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Current: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}x{}", size.width, size.height),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Required: ", Style::default().fg(Color::Gray)),
+            Span::styled("80x14 minimum", Style::default().fg(Color::Green)),
+        ]),
+        Line::from(""),
         Line::from("Resize and try again."),
         Line::from(""),
         Line::from("Tip: you can also run: ferro --help"),
