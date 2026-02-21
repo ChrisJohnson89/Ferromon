@@ -35,6 +35,7 @@ ferro
 ferro --help
 ferro --version
 ferro --tick-ms 750
+ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 ```
 
 ## Keys
