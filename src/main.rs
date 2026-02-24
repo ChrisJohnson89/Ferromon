@@ -73,6 +73,7 @@ struct AppState {
     dash_show_all_mounts: bool,
     footer_tip_idx: u8,
     tick_ms: u64,
+    dump_snapshot: bool,
 }
 
 impl Default for AppState {
@@ -94,6 +95,7 @@ impl Default for AppState {
             dash_show_all_mounts: false,
             footer_tip_idx: 0,
             tick_ms: 500,
+            dump_snapshot: false,
         }
     }
 }
@@ -254,7 +256,7 @@ fn main() -> io::Result<()> {
         ..Default::default()
     };
 
-    let res = run_app(
+    let out = run_app(
         &mut terminal,
         &mut system,
         &mut disks,
@@ -276,7 +278,11 @@ fn main() -> io::Result<()> {
     }
     terminal.show_cursor()?;
 
-    res
+    if let Ok(Some(txt)) = &out {
+        println!("{txt}");
+    }
+
+    out.map(|_| ())
 }
 
 fn render_too_small(frame: &mut ratatui::Frame, area: Rect) {
@@ -318,7 +324,7 @@ fn run_app(
     app: &mut AppState,
     tick_rate: Duration,
     last_tick: &mut Instant,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     // Keep the dashboard cheap: refresh processes + fs scan on a slower cadence.
     let dash_proc_every = Duration::from_secs(3);
     let mut tip_clock = Instant::now();
@@ -389,6 +395,11 @@ fn run_app(
             }
         })?;
 
+        if app.dump_snapshot {
+            app.dump_snapshot = false;
+            return Ok(Some(format_snapshot(&vm, app, system, disks)));
+        }
+
         // Input
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -398,7 +409,7 @@ fn run_app(
                 }
 
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => return Ok(None),
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Esc => {
                         app.show_help = false;
@@ -488,14 +499,17 @@ fn run_app(
                             app.dash_show_all_mounts = !app.dash_show_all_mounts;
                         }
                     }
+                    KeyCode::Char('x') => {
+                        if matches!(app.screen, Screen::Dashboard) {
+                            app.dump_snapshot = true;
+                        }
+                    }
 
                     _ => {}
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -1258,6 +1272,52 @@ fn refresh(system: &mut System, disks: &mut Disks, refresh_processes: bool) {
         system.refresh_processes();
     }
     disks.refresh();
+}
+
+fn format_snapshot(vm: &VmSnapshot, app: &AppState, system: &System, disks: &Disks) -> String {
+    let mut out: Vec<String> = Vec::new();
+    out.push(format!("ferro {} snapshot", VERSION));
+    out.push("".to_string());
+
+    out.push(format!("CPU: {:.1}% cores={}", vm.cpu_usage, vm.cpu_cores));
+    out.push(format!(
+        "MEM: {} / {} ({:.1}%)",
+        format_bytes(vm.used_memory),
+        format_bytes(vm.total_memory),
+        vm.memory_percent
+    ));
+    out.push("".to_string());
+
+    out.push("Top CPU:".to_string());
+    for row in format_top_processes(system, ProcSort::Cpu, 5) {
+        out.push(format!("  {row}"));
+    }
+    out.push("Top MEM:".to_string());
+    for row in format_top_processes(system, ProcSort::Mem, 5) {
+        out.push(format!("  {row}"));
+    }
+    out.push("".to_string());
+
+    let disk_rows = disks_table_filtered(disks, 12, app.dash_show_all_mounts);
+    out.push(if app.dash_show_all_mounts {
+        "Filesystems (all):".to_string()
+    } else {
+        "Filesystems (filtered):".to_string()
+    });
+    out.push("FS	Size	Used	Avail	Use%	Mount".to_string());
+    for r in disk_rows {
+        out.push(format!(
+            "{}	{}	{}	{}	{:.0}%	{}",
+            r.fs,
+            format_bytes(r.size),
+            format_bytes(r.used),
+            format_bytes(r.avail),
+            r.use_pct,
+            r.mount
+        ));
+    }
+
+    out.join("\n")
 }
 
 fn percent(used: u64, total: u64) -> f64 {
