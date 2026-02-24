@@ -19,7 +19,26 @@ You want a “what’s going on with this box?” view in ~2 seconds:
 - Refresh rate control via CLI flag
 
 ## Install
-Rust required. Minimum terminal size: **80x14**.
+
+### Prebuilt binaries (recommended)
+Grab the right archive from **GitHub Releases**, extract, and place `ferro` on your PATH.
+
+Example (Linux x86_64):
+```bash
+# pick a version from: https://github.com/ChrisJohnson89/Ferromon/releases
+VER=v0.3.1
+TARGET=x86_64-unknown-linux-gnu
+curl -L -o ferromon.tar.gz "https://github.com/ChrisJohnson89/Ferromon/releases/download/${VER}/ferromon-${VER}-${TARGET}.tar.gz"
+
+tar -xzf ferromon.tar.gz
+chmod +x ferro
+sudo mv ferro /usr/local/bin/ferro
+
+ferro --version
+```
+
+### Build from source
+Rust required (**rustc 1.80+**). Minimum terminal size: **80x14**.
 
 ```bash
 cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked
