@@ -23,6 +23,8 @@ You want a “what’s going on with this box?” view in ~2 seconds:
 ### Prebuilt binaries (recommended)
 Grab the right archive from **GitHub Releases**, extract, and place `ferro` on your PATH.
 
+After installing, Ferromon can also self-update from inside the TUI (press `u`).
+
 Example (Linux x86_64):
 ```bash
 # pick a version from: https://github.com/ChrisJohnson89/Ferromon/releases
@@ -66,7 +68,9 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - `r` refresh now
 
 ### Contextual
-- Dashboard: `Tab` toggles dir target (CWD ↔ /var), `f` toggles mount filter (filtered ↔ all), `x` prints a text snapshot to stdout and exits
+- Dashboard: `Tab` toggles dir target (CWD ↔ /var), `f` toggles mount filter (filtered ↔ all)
+- Dashboard: `x` prints a text snapshot to stdout and exits
+- Dashboard: `u` downloads and installs the latest release to `~/.local/bin/ferro`
 - Processes: `Tab` toggles sort (CPU ↔ Mem)
 - Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans
 
