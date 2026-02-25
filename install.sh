@@ -40,11 +40,10 @@ RELEASES_JSON="$(curl -fsSL -H 'User-Agent: ferromon-installer' "$API_LIST")" ||
 
 need python3
 
-VER="$(python3 - <<PY
+VER="$(printf "%s" "$RELEASES_JSON" | python3 - "$TARGET" <<'PY'
 import json, sys
 rels=json.loads(sys.stdin.read())
-target = "${TARGET}"
-# GitHub returns newest first.
+target = sys.argv[1] if len(sys.argv) > 1 else ""
 for r in rels:
     tag=r.get('tag_name')
     assets=r.get('assets') or []
@@ -55,7 +54,7 @@ for r in rels:
         raise SystemExit(0)
 print("")
 PY
-<<<"$RELEASES_JSON")"
+)"
 
 [ -n "${VER:-}" ] || die "no suitable release found for target ${TARGET}"
 
