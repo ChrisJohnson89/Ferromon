@@ -38,16 +38,24 @@ API_LIST="https://api.github.com/repos/${OWNER}/${REPO}/releases"
 say "→ Fetching latest release with assets for ${TARGET}…"
 RELEASES_JSON="$(curl -fsSL -H 'User-Agent: ferromon-installer' "$API_LIST")" || die "failed to query GitHub releases"
 
-# Pick the newest release that actually contains the right asset.
-# (Avoids GitHub 'latest' pointing at a release that doesn't have our target.)
-VER=""
-for tag in $(printf "%s" "$RELEASES_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'); do
-  asset="ferromon-${tag}-${TARGET}.tar.gz"
-  if printf "%s" "$RELEASES_JSON" | grep -q "\"name\"[[:space:]]*:[[:space:]]*\"${asset}\""; then
-    VER="$tag"
-    break
-  fi
-done
+need python3
+
+VER="$(python3 - <<PY
+import json, sys
+rels=json.loads(sys.stdin.read())
+target = "${TARGET}"
+# GitHub returns newest first.
+for r in rels:
+    tag=r.get('tag_name')
+    assets=r.get('assets') or []
+    names={a.get('name') for a in assets}
+    want=f"ferromon-{tag}-{target}.tar.gz"
+    if want in names:
+        print(tag)
+        raise SystemExit(0)
+print("")
+PY
+<<<"$RELEASES_JSON")"
 
 [ -n "${VER:-}" ] || die "no suitable release found for target ${TARGET}"
 
@@ -85,10 +93,6 @@ tar -xzf "$TMPDIR/$ASSET" -C "$TMPDIR" || die "failed to extract"
 [ -f "$TMPDIR/$BIN_NAME" ] || die "archive did not contain '$BIN_NAME'"
 chmod +x "$TMPDIR/$BIN_NAME"
 
-# Install destination:
-# 1) /usr/local/bin if writable
-# 2) /usr/local/bin with sudo if available
-# 3) ~/.local/bin
 INSTALL_DIR="/usr/local/bin"
 DEST="$INSTALL_DIR/$BIN_NAME"
 
