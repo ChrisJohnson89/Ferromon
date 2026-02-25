@@ -20,10 +20,17 @@ You want a “what’s going on with this box?” view in ~2 seconds:
 
 ## Install
 
-### Prebuilt binaries (recommended)
-Grab the right archive from **GitHub Releases**, extract, and place `ferro` on your PATH.
+### One-liner install (recommended)
+This installs the latest release for your OS/arch and verifies checksums.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChrisJohnson89/Ferromon/main/install.sh | bash
+```
 
 After installing, Ferromon can also self-update from inside the TUI (press `u`).
+
+### Prebuilt binaries (manual)
+Grab the right archive from **GitHub Releases**, extract, and place `ferro` on your PATH.
 
 Example (Linux x86_64):
 ```bash
