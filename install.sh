@@ -36,19 +36,30 @@ esac
 API_LIST="https://api.github.com/repos/${OWNER}/${REPO}/releases"
 
 say "→ Fetching latest release with assets for ${TARGET}…"
-RELEASES_JSON="$(curl -fsSL -H 'User-Agent: ferromon-installer' "$API_LIST")" || die "failed to query GitHub releases"
-
 need python3
 
-VER="$(printf "%s" "$RELEASES_JSON" | python3 - "$TARGET" <<'PY'
+# Use Python to fetch + select the correct release (more reliable across shells than piping JSON).
+VER="$(python3 - "$TARGET" "$API_LIST" <<'PY'
 import json, sys
-rels=json.loads(sys.stdin.read())
-target = sys.argv[1] if len(sys.argv) > 1 else ""
-for r in rels:
-    tag=r.get('tag_name')
-    assets=r.get('assets') or []
-    names={a.get('name') for a in assets}
-    want=f"ferromon-{tag}-{target}.tar.gz"
+from urllib.request import Request, urlopen
+
+if len(sys.argv) < 3:
+    print("")
+    raise SystemExit(0)
+
+target = sys.argv[1]
+url = sys.argv[2]
+
+req = Request(url, headers={"User-Agent": "ferromon-installer"})
+with urlopen(req, timeout=5) as r:
+    data = r.read().decode("utf-8", errors="replace")
+
+rels = json.loads(data)
+for rel in rels:
+    tag = rel.get("tag_name")
+    assets = rel.get("assets") or []
+    names = {a.get("name") for a in assets}
+    want = f"ferromon-{tag}-{target}.tar.gz"
     if want in names:
         print(tag)
         raise SystemExit(0)
