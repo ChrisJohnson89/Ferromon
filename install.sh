@@ -33,14 +33,23 @@ case "${OS}:${ARCH}" in
     ;;
 esac
 
-API="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
+API_LIST="https://api.github.com/repos/${OWNER}/${REPO}/releases"
 
-say "→ Fetching latest release…"
-LATEST_JSON="$(curl -fsSL -H 'User-Agent: ferromon-installer' "$API")" || die "failed to query GitHub releases"
+say "→ Fetching latest release with assets for ${TARGET}…"
+RELEASES_JSON="$(curl -fsSL -H 'User-Agent: ferromon-installer' "$API_LIST")" || die "failed to query GitHub releases"
 
-# Extract tag_name without jq.
-VER="$(printf "%s" "$LATEST_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-[ -n "${VER:-}" ] || die "could not determine latest tag"
+# Pick the newest release that actually contains the right asset.
+# (Avoids GitHub 'latest' pointing at a release that doesn't have our target.)
+VER=""
+for tag in $(printf "%s" "$RELEASES_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'); do
+  asset="ferromon-${tag}-${TARGET}.tar.gz"
+  if printf "%s" "$RELEASES_JSON" | grep -q "\"name\"[[:space:]]*:[[:space:]]*\"${asset}\""; then
+    VER="$tag"
+    break
+  fi
+done
+
+[ -n "${VER:-}" ] || die "no suitable release found for target ${TARGET}"
 
 ASSET="ferromon-${VER}-${TARGET}.tar.gz"
 SHA="${ASSET}.sha256"
@@ -88,7 +97,7 @@ install_to_user() {
   mkdir -p "$USER_DIR"
   cp "$TMPDIR/$BIN_NAME" "$USER_DIR/$BIN_NAME"
   say "✓ Installed to $USER_DIR/$BIN_NAME"
-  say "  If you get 'command not found', add this to your shell profile:" 
+  say "  If you get 'command not found', add this to your shell profile:"
   say "    export PATH=\"$HOME/.local/bin:\$PATH\""
 }
 
@@ -103,4 +112,7 @@ else
 fi
 
 say "→ Done: $BIN_NAME $VER ($TARGET)"
-"$BIN_NAME" --version || true
+INSTALLED_VER="$($BIN_NAME --version 2>/dev/null || true)"
+if [ -n "$INSTALLED_VER" ]; then
+  say "→ Installed version: $INSTALLED_VER"
+fi
