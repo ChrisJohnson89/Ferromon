@@ -326,7 +326,9 @@ fn save_update_cache(st: &UpdateState) {
         return;
     };
 
-    let dir = path.parent().unwrap();
+    let Some(dir) = path.parent() else {
+        return;
+    };
     let _ = fs::create_dir_all(dir);
 
     let last_checked_unix = st
@@ -463,7 +465,6 @@ fn perform_self_update(latest_tag: &str) -> Result<String, String> {
         .ok_or_else(|| "bad sha file".to_string())
         .map(|s| s.to_string())?;
 
-    // We are not computing sha256 yet (TODO). Still enforce presence.
     if expected.len() < 16 {
         return Err("checksum looked wrong".to_string());
     }
@@ -491,7 +492,9 @@ fn perform_self_update(latest_tag: &str) -> Result<String, String> {
     let ferro_bytes = ferro_bytes.ok_or_else(|| "missing ferro in archive".to_string())?;
 
     let dst = install_path_user().ok_or_else(|| "HOME not set".to_string())?;
-    let dir = dst.parent().unwrap();
+    let dir = dst
+        .parent()
+        .ok_or_else(|| "invalid install destination".to_string())?;
     fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {e}"))?;
 
     let tmp = dst.with_extension("new");
