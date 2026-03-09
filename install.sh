@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#Contributor=jrlong2
 set -euo pipefail
 
 OWNER="ChrisJohnson89"
