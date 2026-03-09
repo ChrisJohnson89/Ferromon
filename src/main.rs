@@ -1058,7 +1058,7 @@ fn render_dashboard(
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(6),
             Constraint::Min(0),
         ])
