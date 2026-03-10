@@ -524,11 +524,40 @@ If this isn't on PATH, add ~/.local/bin to PATH.",
 struct DiskScanState {
     running: bool,
     last_target: Option<PathBuf>,
+    current_path: Option<PathBuf>,
     last_started_at: Option<std::time::SystemTime>,
     last_finished_at: Option<std::time::SystemTime>,
     progress: String,
-    results: Vec<(String, u64)>, // (dir, bytes)
+    results: Vec<DiskEntry>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Debug, Clone)]
+struct DiskEntry {
+    path: PathBuf,
+    bytes: u64,
+    kind: DiskEntryKind,
+}
+
+fn is_file_like_package(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        ext,
+        "app" | "bundle" | "framework" | "plugin" | "kext" | "pkg" | "xpc" | "appex"
+    )
 }
 
 fn main() -> io::Result<()> {
@@ -813,6 +842,11 @@ fn run_app(
                                 DiskTarget::Root => DiskTarget::Var,
                             };
                             app.disk_scroll = 0;
+                            let mut state = app.disk_scan.inner.lock().unwrap();
+                            state.current_path = None;
+                            state.results.clear();
+                            state.error = None;
+                            state.progress.clear();
                         } else if matches!(app.screen, Screen::Processes) {
                             app.proc_sort = match app.proc_sort {
                                 ProcSort::Cpu => ProcSort::Mem,
@@ -824,6 +858,16 @@ fn run_app(
                     KeyCode::Char('s') => {
                         if matches!(app.screen, Screen::DiskDive) {
                             start_disk_scan(app);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if matches!(app.screen, Screen::DiskDive) {
+                            enter_selected_disk_dir(app);
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Backspace => {
+                        if matches!(app.screen, Screen::DiskDive) {
+                            navigate_disk_up(app);
                         }
                     }
                     KeyCode::Char('f') => {
@@ -894,7 +938,7 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
         Screen::Dashboard => ("Dashboard", "p: processes  d: disk  f: filter  Tab: dir"),
         Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
-        Screen::DiskDive => ("Disk dive", "s: scan  Tab: target  Esc: back"),
+        Screen::DiskDive => ("Disk dive", "s: scan  Enter: open dir  ←: up  Tab: target"),
     };
 
     Paragraph::new(Line::from(vec![
@@ -935,7 +979,8 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
     let tips_disk = [
         "s: scan (on-demand)",
         "Tab: change target (/var ↔ home ↔ /)",
-        "↑/↓: scroll · Esc: back",
+        "Enter: open dir · ←/Backspace: up",
+        "↑/↓: select · Esc: back",
     ];
 
     let (label, tip) = match app.screen {
@@ -995,7 +1040,9 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
             lines.push(Line::from("Disk dive:"));
             lines.push(Line::from("  s — start scan"));
             lines.push(Line::from("  Tab — change target (/var ↔ home ↔ /)"));
-            lines.push(Line::from("  ↑/↓ — scroll"));
+            lines.push(Line::from("  ↑/↓ — select"));
+            lines.push(Line::from("  Enter — scan selected directory"));
+            lines.push(Line::from("  ← / Backspace — go to parent directory"));
         }
     }
 
@@ -1385,11 +1432,15 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
     let target = disk_target_path(app.disk_target);
 
     let state = app.disk_scan.inner.lock().unwrap();
+    let current_path = state.current_path.clone().unwrap_or_else(|| target.clone());
 
     let title = if state.running {
-        format!("Disk dive  (target: {})  •  scanning", target.display())
+        format!(
+            "Disk dive  (target: {})  •  scanning",
+            current_path.display()
+        )
     } else {
-        format!("Disk dive  (target: {})", target.display())
+        format!("Disk dive  (target: {})", current_path.display())
     };
 
     let block = Block::default()
@@ -1420,7 +1471,10 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
         Line::from(vec![
             Span::styled("Press ", Style::default().fg(Color::Gray)),
             Span::styled("s", Style::default().fg(Color::Yellow)),
-            Span::styled(" to scan (on-demand) · ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                " to scan this directory · ",
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled("Tab", Style::default().fg(Color::Yellow)),
             Span::styled(" to change target", Style::default().fg(Color::Gray)),
         ])
@@ -1429,10 +1483,12 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
             Span::styled("Cached results. ", Style::default().fg(Color::Gray)),
             Span::styled("s", Style::default().fg(Color::Yellow)),
             Span::styled(" rescan · ", Style::default().fg(Color::Gray)),
-            Span::styled("Tab", Style::default().fg(Color::Yellow)),
-            Span::styled(" target · ", Style::default().fg(Color::Gray)),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::styled(" open dir · ", Style::default().fg(Color::Gray)),
+            Span::styled("←", Style::default().fg(Color::Yellow)),
+            Span::styled(" up · ", Style::default().fg(Color::Gray)),
             Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
-            Span::styled(" scroll", Style::default().fg(Color::Gray)),
+            Span::styled(" select", Style::default().fg(Color::Gray)),
         ])
     };
 
@@ -1442,32 +1498,57 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
     // Results table
     let mut results = state.results.clone();
     drop(state);
-    results.sort_by_key(|(_, bytes)| Reverse(*bytes));
+    results.sort_by_key(|entry| Reverse(entry.bytes));
 
     let visible = rows[1].height.saturating_sub(2) as usize; // table header + borders
-    let offset = (app.disk_scroll as usize).min(results.len().saturating_sub(1));
+    let selected = (app.disk_scroll as usize).min(results.len().saturating_sub(1));
+    app.disk_scroll = selected as u16;
+    let offset = selected.saturating_sub(visible.saturating_sub(1));
     let slice = &results[offset..results.len().min(offset + visible.max(1))];
 
-    let table_rows = slice.iter().enumerate().map(|(i, (dir, bytes))| {
-        let zebra = if (offset + i) % 2 == 0 {
+    let table_rows = slice.iter().enumerate().map(|(i, entry)| {
+        let absolute_idx = offset + i;
+        let base_style = if absolute_idx.is_multiple_of(2) {
             Style::default().fg(Color::White)
         } else {
             Style::default().fg(Color::Gray)
         };
+        let style = if absolute_idx == selected {
+            base_style
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            base_style
+        };
+        let name = entry
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| entry.path.display().to_string());
+        let kind = match entry.kind {
+            DiskEntryKind::Directory => "dir",
+            DiskEntryKind::File => "file",
+        };
 
         Row::new(vec![
-            Cell::from(dir.clone()),
-            Cell::from(format_bytes(*bytes)),
+            Cell::from(kind),
+            Cell::from(name),
+            Cell::from(format_bytes(entry.bytes)),
         ])
-        .style(zebra)
+        .style(style)
     });
 
     let table = Table::new(
         table_rows,
-        [Constraint::Percentage(72), Constraint::Length(14)],
+        [
+            Constraint::Length(6),
+            Constraint::Percentage(66),
+            Constraint::Length(14),
+        ],
     )
     .header(
-        Row::new(vec!["Directory", "Size"]).style(
+        Row::new(vec!["Kind", "Name", "Size"]).style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -1475,7 +1556,7 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
     )
     .block(
         Block::default()
-            .title("Top dirs")
+            .title("Largest entries")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green)),
     );
@@ -1487,6 +1568,11 @@ fn start_disk_scan(app: &mut AppState) {
     let target = disk_target_path(app.disk_target);
 
     // If already scanning, ignore.
+    let scan_path = {
+        let state = app.disk_scan.inner.lock().unwrap();
+        state.current_path.clone().unwrap_or_else(|| target.clone())
+    };
+
     {
         let mut state = app.disk_scan.inner.lock().unwrap();
         if state.running {
@@ -1497,14 +1583,16 @@ fn start_disk_scan(app: &mut AppState) {
         state.progress = String::new();
         state.results.clear();
         state.last_target = Some(target.clone());
+        state.current_path = Some(scan_path.clone());
         state.last_started_at = Some(std::time::SystemTime::now());
         state.last_finished_at = None;
     }
 
     let inner = app.disk_scan.inner.clone();
+    app.disk_scroll = 0;
 
     std::thread::spawn(move || {
-        let res = scan_top_dirs(&target, &inner);
+        let res = scan_path_entries(&scan_path, &inner);
         let mut state = inner.lock().unwrap();
         state.running = false;
         state.last_finished_at = Some(std::time::SystemTime::now());
@@ -1514,31 +1602,77 @@ fn start_disk_scan(app: &mut AppState) {
     });
 }
 
-fn scan_top_dirs(target: &Path, inner: &Arc<Mutex<DiskScanState>>) -> Result<(), String> {
+fn enter_selected_disk_dir(app: &mut AppState) {
+    let next_path = {
+        let state = app.disk_scan.inner.lock().unwrap();
+        let idx = app.disk_scroll as usize;
+        state.results.get(idx).and_then(|entry| {
+            if entry.kind == DiskEntryKind::Directory {
+                Some(entry.path.clone())
+            } else {
+                None
+            }
+        })
+    };
+
+    if let Some(path) = next_path {
+        let mut state = app.disk_scan.inner.lock().unwrap();
+        state.current_path = Some(path);
+        state.results.clear();
+        state.error = None;
+        app.disk_scroll = 0;
+        drop(state);
+        start_disk_scan(app);
+    }
+}
+
+fn navigate_disk_up(app: &mut AppState) {
+    let target = disk_target_path(app.disk_target);
+    let parent = {
+        let state = app.disk_scan.inner.lock().unwrap();
+        let current = state.current_path.clone().unwrap_or_else(|| target.clone());
+        if current == target {
+            None
+        } else {
+            current.parent().map(Path::to_path_buf)
+        }
+    };
+
+    if let Some(path) = parent {
+        let mut state = app.disk_scan.inner.lock().unwrap();
+        state.current_path = Some(path);
+        state.results.clear();
+        state.error = None;
+        app.disk_scroll = 0;
+        drop(state);
+        start_disk_scan(app);
+    }
+}
+
+fn scan_path_entries(target: &Path, inner: &Arc<Mutex<DiskScanState>>) -> Result<(), String> {
     let base = target.to_path_buf();
     if !base.exists() {
         return Err(format!("Target does not exist: {}", base.display()));
     }
+    if !base.is_dir() {
+        return Err(format!("Target is not a directory: {}", base.display()));
+    }
 
-    // Quick heuristic: we compute sizes for immediate children (depth 1) and their descendants (depth up to 12)
-    // but we stop early if the filesystem is huge.
     let mut children: Vec<PathBuf> = vec![];
-    if base.is_dir() {
-        if let Ok(rd) = std::fs::read_dir(&base) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    children.push(p);
-                }
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.exists() {
+                children.push(p);
             }
         }
     }
 
     if children.is_empty() {
-        return Err("No child directories found to scan".to_string());
+        return Err("No child files or directories found to scan".to_string());
     }
 
-    let mut results: Vec<(String, u64)> = Vec::new();
+    let mut results: Vec<DiskEntry> = Vec::new();
     let mut total_seen: u64 = 0;
 
     for (idx, child) in children.iter().enumerate() {
@@ -1547,35 +1681,18 @@ fn scan_top_dirs(target: &Path, inner: &Arc<Mutex<DiskScanState>>) -> Result<(),
             st.progress = format!("{}/{}: {}", idx + 1, children.len(), child.display());
         }
 
-        let mut size: u64 = 0;
-        let mut seen: u64 = 0;
+        let (kind, size, seen) = scan_entry_size(child, total_seen);
+        total_seen = total_seen.saturating_add(seen);
 
-        // Walk with a depth limit to stay responsive.
-        for entry in WalkDir::new(child)
-            .follow_links(false)
-            .max_depth(12)
-            .into_iter()
-            .flatten()
-        {
-            let ft = entry.file_type();
-            if ft.is_file() {
-                if let Ok(md) = entry.metadata() {
-                    size = size.saturating_add(md.len());
-                }
-                seen += 1;
-                total_seen += 1;
-                // Safety cap: don't scan endlessly.
-                if seen >= 50_000 || total_seen >= 300_000 {
-                    break;
-                }
-            }
-        }
+        results.push(DiskEntry {
+            path: child.clone(),
+            bytes: size,
+            kind,
+        });
 
-        results.push((child.display().to_string(), size));
-
-        // Keep top 25 as we go.
-        results.sort_by_key(|(_, b)| Reverse(*b));
-        results.truncate(25);
+        // Keep top 40 as we go.
+        results.sort_by_key(|entry| Reverse(entry.bytes));
+        results.truncate(40);
 
         {
             let mut st = inner.lock().unwrap();
@@ -1590,6 +1707,47 @@ fn scan_top_dirs(target: &Path, inner: &Arc<Mutex<DiskScanState>>) -> Result<(),
     }
 
     Ok(())
+}
+
+fn scan_entry_size(path: &Path, total_seen: u64) -> (DiskEntryKind, u64, u64) {
+    if path.is_file() {
+        let bytes = fs::metadata(path).map(|md| md.len()).unwrap_or(0);
+        return (DiskEntryKind::File, bytes, 1);
+    }
+
+    if is_file_like_package(path) {
+        let (size, seen) = scan_dir_size(path, total_seen);
+        return (DiskEntryKind::File, size, seen);
+    }
+
+    let (size, seen) = scan_dir_size(path, total_seen);
+    (DiskEntryKind::Directory, size, seen)
+}
+
+fn scan_dir_size(path: &Path, total_seen: u64) -> (u64, u64) {
+    let mut size: u64 = 0;
+    let mut seen: u64 = 0;
+
+    // Walk with a depth limit to stay responsive.
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .max_depth(12)
+        .into_iter()
+        .flatten()
+    {
+        let ft = entry.file_type();
+        if ft.is_file() {
+            if let Ok(md) = entry.metadata() {
+                size = size.saturating_add(md.len());
+            }
+            seen += 1;
+            if seen >= 50_000 || total_seen.saturating_add(seen) >= 300_000 {
+                break;
+            }
+        }
+    }
+
+    (size, seen)
 }
 
 fn disk_target_path(target: DiskTarget) -> PathBuf {
