@@ -81,6 +81,34 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - Processes: `Tab` toggles sort (CPU ↔ Mem)
 - Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans, `Enter` drills into a directory, `←`/`Backspace` goes up
 
+## SRE Roadmap
+Features that would make Ferromon much stronger as a sysadmin/SRE first-response tool:
+
+### Highest priority
+- Service health: `systemd` units, failed services, restart counts, recent state changes
+- Log tailing: `journalctl`/syslog view with severity and unit filters
+- Network visibility: listening ports, established connections, RX/TX throughput, top sockets by process
+- Host pressure signals: load average, swap, iowait, PSI, inode usage, open file descriptors
+- Process inspection/actions: full command line, parent/child tree, cwd/exe path, signals/kill
+- Better snapshots: JSON/text export with hostname, kernel, timestamp, services, network, and log context
+- Container/runtime visibility: Docker/containerd/Kubernetes pod and container summaries
+- Threshold highlighting: obvious warnings for hot CPU, low memory, failed units, full disks, inode exhaustion
+
+### Second wave
+- Historical mini-trends: small sparklines or a short rolling history for CPU, memory, network, and disk IO
+- Filesystem detail: read-only mounts, mount options, NFS/stale mount visibility
+- Search/filter UX: quick filtering for processes, services, mounts, and logs
+- Remote mode: SSH collection or remote snapshot mode for fast fleet triage
+
+### Suggested build order
+1. Service health
+2. Logs
+3. Network
+4. Load/swap/pressure/inodes
+5. Process inspection/actions
+6. JSON snapshot/export
+7. Container visibility
+
 ## Screenshot
 *(add one)*
 
