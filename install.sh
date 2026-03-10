@@ -47,7 +47,7 @@ SHA="${ASSET}.sha256"
 URL="https://github.com/${OWNER}/${REPO}/releases/download/${VER}/${ASSET}"
 SHA_URL="https://github.com/${OWNER}/${REPO}/releases/download/${VER}/${SHA}"
 
-printf '%s\n' "$RELEASE_JSON" | grep -q "\"name\": \"$ASSET\"" \
+printf '%s\n' "$RELEASE_JSON" | grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"$ASSET\"" \
   || die "latest release ${VER} does not include asset ${ASSET}"
 
 TMPDIR="$(mktemp -d)"
