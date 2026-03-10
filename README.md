@@ -15,7 +15,7 @@ You want a “what’s going on with this box?” view in ~2 seconds:
 - Dashboard: CPU + Memory gauges + **top processes**
 - Disk panel: compact **df-style** overview (filtered to “real” mounts)
 - Processes view (`p`): top CPU/mem with scroll
-- Disk dive (`d`): on-demand directory sizing (kept out of the hot loop)
+- Disk dive (`d`): on-demand directory sizing with drill-down into directories and large files
 - Refresh rate control via CLI flag
 
 ## Install
@@ -79,7 +79,7 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - Dashboard: `x` prints a text snapshot to stdout and exits
 - Dashboard: `u` downloads and installs the latest release to `~/.local/bin/ferro`
 - Processes: `Tab` toggles sort (CPU ↔ Mem)
-- Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans
+- Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans, `Enter` drills into a directory, `←`/`Backspace` goes up
 
 ## Screenshot
 *(add one)*
