@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Read;
+use std::process::Command;
 
 use flate2::read::GzDecoder;
 use serde::Deserialize;
@@ -37,6 +38,8 @@ enum Screen {
     Dashboard,
     Processes,
     DiskDive,
+    Services,
+    Logs,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +64,31 @@ enum DashDirTarget {
     Var,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ServiceFilter {
+    Failed,
+    Unhealthy,
+    Active,
+    #[default]
+    All,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum LogSeverity {
+    Errors,
+    Warnings,
+    #[default]
+    Info,
+    Debug,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum LogUnitFilter {
+    #[default]
+    Selected,
+    All,
+}
+
 struct AppState {
     screen: Screen,
     show_help: bool,
@@ -71,6 +99,16 @@ struct AppState {
     disk_target: DiskTarget,
     disk_scroll: u16,
     disk_scan: DiskScan,
+    service_scroll: u16,
+    service_filter: ServiceFilter,
+    service_state: ServiceState,
+    service_last_refresh_at: Option<Instant>,
+    logs_scroll: u16,
+    log_severity: LogSeverity,
+    log_unit_filter: LogUnitFilter,
+    log_state: LogState,
+    log_last_refresh_at: Option<Instant>,
+    log_selected_unit: Option<String>,
 
     // Dashboard caches (quick overview)
     dash_dir_target: DashDirTarget,
@@ -98,6 +136,16 @@ impl Default for AppState {
             disk_target: DiskTarget::default(),
             disk_scroll: 0,
             disk_scan: DiskScan::default(),
+            service_scroll: 0,
+            service_filter: ServiceFilter::default(),
+            service_state: ServiceState::default(),
+            service_last_refresh_at: None,
+            logs_scroll: 0,
+            log_severity: LogSeverity::default(),
+            log_unit_filter: LogUnitFilter::default(),
+            log_state: LogState::default(),
+            log_last_refresh_at: None,
+            log_selected_unit: None,
             dash_dir_target: DashDirTarget::default(),
             dash_dir_sizes: Vec::new(),
             dash_top_cpu: Vec::new(),
@@ -117,6 +165,16 @@ impl Default for AppState {
 #[derive(Clone, Default)]
 struct DiskScan {
     inner: Arc<Mutex<DiskScanState>>,
+}
+
+#[derive(Clone, Default)]
+struct ServiceState {
+    inner: Arc<Mutex<ServiceStateInner>>,
+}
+
+#[derive(Clone, Default)]
+struct LogState {
+    inner: Arc<Mutex<LogStateInner>>,
 }
 
 #[derive(Default)]
@@ -212,7 +270,7 @@ USAGE:
     println!(
         "
 KEYS (in-app):
-  q quit · ? help · Esc back · p processes · d disk dive · r refresh · f mounts · u update · x snapshot
+  q quit · ? help · Esc back · p processes · d disk dive · v services · l logs · r refresh · f mounts · u update/filter · x snapshot
 
 UPDATE:
   Ferromon checks GitHub releases occasionally and can self-update.
@@ -532,6 +590,44 @@ struct DiskScanState {
     error: Option<String>,
 }
 
+#[derive(Default)]
+struct ServiceStateInner {
+    running: bool,
+    unsupported: Option<String>,
+    error: Option<String>,
+    rows: Vec<ServiceRow>,
+    last_updated_at: Option<std::time::SystemTime>,
+}
+
+#[derive(Default)]
+struct LogStateInner {
+    running: bool,
+    unsupported: Option<String>,
+    error: Option<String>,
+    lines: Vec<String>,
+    last_updated_at: Option<std::time::SystemTime>,
+    source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceHealth {
+    Healthy,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceRow {
+    name: String,
+    description: String,
+    load_state: String,
+    active_state: String,
+    sub_state: String,
+    restarts: u32,
+    last_change: String,
+    health: ServiceHealth,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiskEntryKind {
     Directory,
@@ -666,6 +762,381 @@ fn render_too_small(frame: &mut ratatui::Frame, area: Rect) {
     );
 }
 
+fn services_supported_message() -> Option<String> {
+    if cfg!(target_os = "linux") {
+        None
+    } else {
+        Some("Service health and journal logs are currently Linux-only.".to_string())
+    }
+}
+
+fn refresh_services(app: &mut AppState, force: bool) {
+    if let Some(msg) = services_supported_message() {
+        let mut state = app.service_state.inner.lock().unwrap();
+        state.running = false;
+        state.unsupported = Some(msg);
+        state.error = None;
+        state.rows.clear();
+        return;
+    }
+
+    let due = force
+        || app
+            .service_last_refresh_at
+            .map(|t| t.elapsed() >= Duration::from_secs(15))
+            .unwrap_or(true);
+    if !due {
+        return;
+    }
+
+    {
+        let mut state = app.service_state.inner.lock().unwrap();
+        if state.running {
+            return;
+        }
+        state.running = true;
+        state.error = None;
+        state.unsupported = None;
+    }
+
+    app.service_last_refresh_at = Some(Instant::now());
+    let inner = app.service_state.inner.clone();
+    std::thread::spawn(move || {
+        let result = collect_services();
+        let mut state = inner.lock().unwrap();
+        state.running = false;
+        match result {
+            Ok(rows) => {
+                state.rows = rows;
+                state.error = None;
+                state.last_updated_at = Some(std::time::SystemTime::now());
+            }
+            Err(err) => {
+                state.error = Some(err);
+            }
+        }
+    });
+}
+
+fn refresh_logs(app: &mut AppState, force: bool) {
+    if let Some(msg) = services_supported_message() {
+        let mut state = app.log_state.inner.lock().unwrap();
+        state.running = false;
+        state.unsupported = Some(msg);
+        state.error = None;
+        state.lines.clear();
+        state.source.clear();
+        return;
+    }
+
+    let due = force
+        || app
+            .log_last_refresh_at
+            .map(|t| t.elapsed() >= Duration::from_secs(5))
+            .unwrap_or(true);
+    if !due {
+        return;
+    }
+
+    let unit = match app.log_unit_filter {
+        LogUnitFilter::Selected => app.log_selected_unit.clone(),
+        LogUnitFilter::All => None,
+    };
+
+    {
+        let mut state = app.log_state.inner.lock().unwrap();
+        if state.running {
+            return;
+        }
+        state.running = true;
+        state.error = None;
+        state.unsupported = None;
+    }
+
+    app.log_last_refresh_at = Some(Instant::now());
+    let inner = app.log_state.inner.clone();
+    let severity = app.log_severity;
+    std::thread::spawn(move || {
+        let result = collect_logs(unit.as_deref(), severity);
+        let mut state = inner.lock().unwrap();
+        state.running = false;
+        match result {
+            Ok((source, lines)) => {
+                state.source = source;
+                state.lines = lines;
+                state.error = None;
+                state.last_updated_at = Some(std::time::SystemTime::now());
+            }
+            Err(err) => {
+                state.error = Some(err);
+            }
+        }
+    });
+}
+
+fn collect_services() -> Result<Vec<ServiceRow>, String> {
+    if !cfg!(target_os = "linux") {
+        return Err("services are unsupported on this OS".to_string());
+    }
+
+    let output = Command::new("systemctl")
+        .args([
+            "show",
+            "--type=service",
+            "--all",
+            "--no-pager",
+            "--property=Id,Description,LoadState,ActiveState,SubState,NRestarts,ActiveEnterTimestamp,InactiveEnterTimestamp",
+        ])
+        .output()
+        .map_err(|e| format!("failed to run systemctl: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("systemctl exited with {}", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut rows = Vec::new();
+    for block in stdout.split("\n\n") {
+        let mut name = String::new();
+        let mut description = String::new();
+        let mut load_state = String::new();
+        let mut active_state = String::new();
+        let mut sub_state = String::new();
+        let mut restarts = 0u32;
+        let mut active_enter = String::new();
+        let mut inactive_enter = String::new();
+
+        for line in block.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "Id" => name = value.to_string(),
+                "Description" => description = value.to_string(),
+                "LoadState" => load_state = value.to_string(),
+                "ActiveState" => active_state = value.to_string(),
+                "SubState" => sub_state = value.to_string(),
+                "NRestarts" => restarts = value.parse::<u32>().unwrap_or(0),
+                "ActiveEnterTimestamp" => active_enter = value.to_string(),
+                "InactiveEnterTimestamp" => inactive_enter = value.to_string(),
+                _ => {}
+            }
+        }
+
+        if name.is_empty() || !name.ends_with(".service") {
+            continue;
+        }
+
+        let last_change = if active_state == "active" {
+            active_enter
+        } else {
+            inactive_enter
+        };
+        let health = service_health(&load_state, &active_state, &sub_state, restarts);
+
+        rows.push(ServiceRow {
+            name,
+            description,
+            load_state,
+            active_state,
+            sub_state,
+            restarts,
+            last_change: simplify_timestamp(&last_change),
+            health,
+        });
+    }
+
+    rows.sort_by_key(|row| {
+        (
+            service_health_rank(row.health),
+            Reverse(row.restarts),
+            row.name.clone(),
+        )
+    });
+    Ok(rows)
+}
+
+fn collect_logs(
+    unit: Option<&str>,
+    severity: LogSeverity,
+) -> Result<(String, Vec<String>), String> {
+    if !cfg!(target_os = "linux") {
+        return Err("logs are unsupported on this OS".to_string());
+    }
+
+    let mut cmd = Command::new("journalctl");
+    cmd.args(["--no-pager", "-o", "short-iso", "-n", "80"]);
+    match severity {
+        LogSeverity::Errors => {
+            cmd.args(["-p", "err"]);
+        }
+        LogSeverity::Warnings => {
+            cmd.args(["-p", "warning"]);
+        }
+        LogSeverity::Info => {
+            cmd.args(["-p", "info"]);
+        }
+        LogSeverity::Debug => {
+            cmd.args(["-p", "debug"]);
+        }
+    }
+    if let Some(unit) = unit {
+        cmd.args(["-u", unit]);
+    }
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines = stdout
+                .lines()
+                .map(|line| line.to_string())
+                .collect::<Vec<String>>();
+            return Ok(("journalctl".to_string(), lines));
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                return fallback_syslog(unit, severity, &stderr);
+            }
+        }
+        Err(err) => {
+            return fallback_syslog(unit, severity, &format!("journalctl failed: {err}"));
+        }
+    }
+
+    fallback_syslog(unit, severity, "journalctl failed")
+}
+
+fn fallback_syslog(
+    unit: Option<&str>,
+    severity: LogSeverity,
+    journal_error: &str,
+) -> Result<(String, Vec<String>), String> {
+    let syslog_path = ["/var/log/syslog", "/var/log/messages"]
+        .iter()
+        .find(|path| Path::new(path).exists())
+        .copied()
+        .ok_or_else(|| journal_error.to_string())?;
+
+    let output = Command::new("tail")
+        .args(["-n", "120", syslog_path])
+        .output()
+        .map_err(|e| format!("{journal_error}; fallback tail failed: {e}"))?;
+    if !output.status.success() {
+        return Err(journal_error.to_string());
+    }
+
+    let mut lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<String>>();
+
+    if let Some(unit) = unit {
+        lines.retain(|line| line.contains(unit));
+    }
+
+    let needle = match severity {
+        LogSeverity::Errors => Some("err"),
+        LogSeverity::Warnings => Some("warn"),
+        LogSeverity::Info => None,
+        LogSeverity::Debug => None,
+    };
+    if let Some(needle) = needle {
+        let needle = needle.to_string();
+        lines.retain(|line| line.to_lowercase().contains(&needle));
+    }
+
+    Ok((format!("syslog ({syslog_path})"), lines))
+}
+
+fn service_health(
+    load_state: &str,
+    active_state: &str,
+    sub_state: &str,
+    restarts: u32,
+) -> ServiceHealth {
+    if load_state != "loaded" || active_state == "failed" {
+        ServiceHealth::Critical
+    } else if active_state != "active" || sub_state != "running" || restarts > 0 {
+        ServiceHealth::Warning
+    } else {
+        ServiceHealth::Healthy
+    }
+}
+
+fn service_health_rank(health: ServiceHealth) -> u8 {
+    match health {
+        ServiceHealth::Critical => 0,
+        ServiceHealth::Warning => 1,
+        ServiceHealth::Healthy => 2,
+    }
+}
+
+fn simplify_timestamp(ts: &str) -> String {
+    if ts.trim().is_empty() || ts.trim() == "n/a" {
+        "-".to_string()
+    } else {
+        trim_to(ts.trim(), 24)
+    }
+}
+
+fn service_filter_label(filter: ServiceFilter) -> &'static str {
+    match filter {
+        ServiceFilter::Failed => "failed",
+        ServiceFilter::Unhealthy => "unhealthy",
+        ServiceFilter::Active => "active",
+        ServiceFilter::All => "all",
+    }
+}
+
+fn log_severity_label(sev: LogSeverity) -> &'static str {
+    match sev {
+        LogSeverity::Errors => "err+",
+        LogSeverity::Warnings => "warning+",
+        LogSeverity::Info => "info+",
+        LogSeverity::Debug => "debug+",
+    }
+}
+
+fn log_unit_filter_label(filter: LogUnitFilter, selected_unit: Option<&str>) -> String {
+    match filter {
+        LogUnitFilter::Selected => selected_unit.unwrap_or("selected").to_string(),
+        LogUnitFilter::All => "all units".to_string(),
+    }
+}
+
+fn filtered_service_rows(rows: &[ServiceRow], filter: ServiceFilter) -> Vec<ServiceRow> {
+    rows.iter()
+        .filter(|row| match filter {
+            ServiceFilter::Failed => row.health == ServiceHealth::Critical,
+            ServiceFilter::Unhealthy => row.health != ServiceHealth::Healthy,
+            ServiceFilter::Active => row.active_state == "active",
+            ServiceFilter::All => true,
+        })
+        .cloned()
+        .collect()
+}
+
+fn selected_service(app: &AppState) -> Option<ServiceRow> {
+    let state = app.service_state.inner.lock().unwrap();
+    let rows = filtered_service_rows(&state.rows, app.service_filter);
+    rows.get(app.service_scroll as usize).cloned()
+}
+
+fn open_logs_for_selected_service(app: &mut AppState) {
+    if let Some(row) = selected_service(app) {
+        app.log_selected_unit = Some(row.name);
+        app.logs_scroll = 0;
+        app.screen = Screen::Logs;
+        refresh_logs(app, true);
+    }
+}
+
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     system: &mut System,
@@ -696,6 +1167,12 @@ fn run_app(
             if matches!(app.screen, Screen::Dashboard) && refresh_processes {
                 // reuse this timestamp for both proc+fs scan cadence
                 app.dash_last_proc_at = Some(Instant::now());
+            }
+            if matches!(app.screen, Screen::Services) {
+                refresh_services(app, false);
+            }
+            if matches!(app.screen, Screen::Logs) {
+                refresh_logs(app, false);
             }
             *last_tick = Instant::now();
 
@@ -734,6 +1211,8 @@ fn run_app(
                 Screen::Dashboard => render_dashboard(frame, rows[1], &vm, app, system),
                 Screen::Processes => render_processes(frame, rows[1], app, system),
                 Screen::DiskDive => render_disk_dive(frame, rows[1], app),
+                Screen::Services => render_services(frame, rows[1], app),
+                Screen::Logs => render_logs(frame, rows[1], app),
             }
 
             // Footer/help
@@ -784,6 +1263,20 @@ fn run_app(
                         app.show_help = false;
                         app.screen = Screen::DiskDive;
                     }
+                    KeyCode::Char('v') => {
+                        app.show_help = false;
+                        app.screen = Screen::Services;
+                        refresh_services(app, true);
+                    }
+                    KeyCode::Char('l') => {
+                        app.show_help = false;
+                        if matches!(app.screen, Screen::Services) {
+                            open_logs_for_selected_service(app);
+                        } else {
+                            app.screen = Screen::Logs;
+                            refresh_logs(app, true);
+                        }
+                    }
                     KeyCode::Char('r') => {
                         // manual refresh, including processes if currently viewing them
                         let refresh_processes = if matches!(app.screen, Screen::Processes) {
@@ -802,6 +1295,12 @@ fn run_app(
                             // reuse this timestamp for both proc+fs scan cadence
                             app.dash_last_proc_at = Some(Instant::now());
                         }
+                        if matches!(app.screen, Screen::Services) {
+                            refresh_services(app, true);
+                        }
+                        if matches!(app.screen, Screen::Logs) {
+                            refresh_logs(app, true);
+                        }
                         *last_tick = Instant::now();
 
                         if tip_clock.elapsed() >= Duration::from_secs(12) {
@@ -816,6 +1315,10 @@ fn run_app(
                             app.proc_scroll = app.proc_scroll.saturating_sub(1);
                         } else if matches!(app.screen, Screen::DiskDive) {
                             app.disk_scroll = app.disk_scroll.saturating_sub(1);
+                        } else if matches!(app.screen, Screen::Services) {
+                            app.service_scroll = app.service_scroll.saturating_sub(1);
+                        } else if matches!(app.screen, Screen::Logs) {
+                            app.logs_scroll = app.logs_scroll.saturating_sub(1);
                         }
                     }
                     KeyCode::Down => {
@@ -823,6 +1326,10 @@ fn run_app(
                             app.proc_scroll = app.proc_scroll.saturating_add(1);
                         } else if matches!(app.screen, Screen::DiskDive) {
                             app.disk_scroll = app.disk_scroll.saturating_add(1);
+                        } else if matches!(app.screen, Screen::Services) {
+                            app.service_scroll = app.service_scroll.saturating_add(1);
+                        } else if matches!(app.screen, Screen::Logs) {
+                            app.logs_scroll = app.logs_scroll.saturating_add(1);
                         }
                     }
 
@@ -853,6 +1360,23 @@ fn run_app(
                                 ProcSort::Mem => ProcSort::Cpu,
                             };
                             app.proc_scroll = 0;
+                        } else if matches!(app.screen, Screen::Services) {
+                            app.service_filter = match app.service_filter {
+                                ServiceFilter::Failed => ServiceFilter::Unhealthy,
+                                ServiceFilter::Unhealthy => ServiceFilter::Active,
+                                ServiceFilter::Active => ServiceFilter::All,
+                                ServiceFilter::All => ServiceFilter::Failed,
+                            };
+                            app.service_scroll = 0;
+                        } else if matches!(app.screen, Screen::Logs) {
+                            app.log_severity = match app.log_severity {
+                                LogSeverity::Errors => LogSeverity::Warnings,
+                                LogSeverity::Warnings => LogSeverity::Info,
+                                LogSeverity::Info => LogSeverity::Debug,
+                                LogSeverity::Debug => LogSeverity::Errors,
+                            };
+                            app.logs_scroll = 0;
+                            refresh_logs(app, true);
                         }
                     }
                     KeyCode::Char('s') => {
@@ -863,6 +1387,8 @@ fn run_app(
                     KeyCode::Enter => {
                         if matches!(app.screen, Screen::DiskDive) {
                             enter_selected_disk_dir(app);
+                        } else if matches!(app.screen, Screen::Services) {
+                            open_logs_for_selected_service(app);
                         }
                     }
                     KeyCode::Left | KeyCode::Backspace => {
@@ -883,6 +1409,13 @@ fn run_app(
                     KeyCode::Char('u') => {
                         if matches!(app.screen, Screen::Dashboard) && app.update.available {
                             app.do_update = true;
+                        } else if matches!(app.screen, Screen::Logs) {
+                            app.log_unit_filter = match app.log_unit_filter {
+                                LogUnitFilter::Selected => LogUnitFilter::All,
+                                LogUnitFilter::All => LogUnitFilter::Selected,
+                            };
+                            app.logs_scroll = 0;
+                            refresh_logs(app, true);
                         }
                     }
 
@@ -936,9 +1469,11 @@ fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot
 
 fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
-        Screen::Dashboard => ("Dashboard", "p: processes  d: disk  f: filter  Tab: dir"),
+        Screen::Dashboard => ("Dashboard", "p: processes  d: disk  v: services  l: logs"),
         Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
         Screen::DiskDive => ("Disk dive", "s: scan  Enter: open dir  ←: up  Tab: target"),
+        Screen::Services => ("Services", "Tab: filter  Enter/l: logs  r: refresh"),
+        Screen::Logs => ("Logs", "Tab: severity  u: unit filter  r: refresh"),
     };
 
     Paragraph::new(Line::from(vec![
@@ -969,7 +1504,7 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
     let tips_dashboard = [
         "Tab: toggle dir target (CWD ↔ /var)",
         "f: toggle mount filter (filtered ↔ all)",
-        "p: processes · d: disk dive",
+        "p: processes · d: disk dive · v: services · l: logs",
         "r: refresh now · ?: help",
         "Esc: back to dashboard",
     ];
@@ -981,6 +1516,18 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
         "Tab: change target (/var ↔ home ↔ /)",
         "Enter: open dir · ←/Backspace: up",
         "↑/↓: select · Esc: back",
+    ];
+
+    let tips_services = [
+        "Tab: filter failed/unhealthy/active/all",
+        "Enter or l: open logs for selected unit",
+        "↑/↓: select unit · r: refresh",
+    ];
+
+    let tips_logs = [
+        "Tab: cycle severity err+/warning+/info+/debug+",
+        "u: selected unit ↔ all units",
+        "↑/↓: scroll · r: refresh",
     ];
 
     let (label, tip) = match app.screen {
@@ -999,6 +1546,14 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
         Screen::DiskDive => (
             "Tip",
             tips_disk[(app.footer_tip_idx as usize) % tips_disk.len()].to_string(),
+        ),
+        Screen::Services => (
+            "Tip",
+            tips_services[(app.footer_tip_idx as usize) % tips_services.len()].to_string(),
+        ),
+        Screen::Logs => (
+            "Tip",
+            tips_logs[(app.footer_tip_idx as usize) % tips_logs.len()].to_string(),
         ),
     };
 
@@ -1020,6 +1575,8 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
         Line::from("  ? — toggle help"),
         Line::from("  Esc — back to dashboard"),
         Line::from("  r — refresh now"),
+        Line::from("  v — services"),
+        Line::from("  l — logs"),
         Line::from(""),
     ];
 
@@ -1043,6 +1600,24 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
             lines.push(Line::from("  ↑/↓ — select"));
             lines.push(Line::from("  Enter — scan selected directory"));
             lines.push(Line::from("  ← / Backspace — go to parent directory"));
+        }
+        Screen::Services => {
+            lines.push(Line::from("Services (Linux-only):"));
+            lines.push(Line::from(
+                "  Tab — cycle filters (failed ↔ unhealthy ↔ active ↔ all)",
+            ));
+            lines.push(Line::from("  ↑/↓ — select service"));
+            lines.push(Line::from("  Enter / l — open logs for selected unit"));
+            lines.push(Line::from("  r — refresh service list"));
+        }
+        Screen::Logs => {
+            lines.push(Line::from("Logs (Linux-only):"));
+            lines.push(Line::from(
+                "  Tab — cycle severity (err+ ↔ warning+ ↔ info+ ↔ debug+)",
+            ));
+            lines.push(Line::from("  u — selected unit ↔ all units"));
+            lines.push(Line::from("  ↑/↓ — scroll"));
+            lines.push(Line::from("  r — refresh logs"));
         }
     }
 
@@ -1562,6 +2137,291 @@ fn render_disk_dive(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) 
     );
 
     frame.render_widget(table, rows[1]);
+}
+
+fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
+    let state = app.service_state.inner.lock().unwrap();
+
+    if let Some(msg) = &state.unsupported {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("Services"),
+                Line::from(""),
+                Line::from(msg.clone()),
+                Line::from(""),
+                Line::from("You can still ship this build and test the Linux path on a server."),
+            ])
+            .block(Block::default().title("Services").borders(Borders::ALL))
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+
+    let rows = filtered_service_rows(&state.rows, app.service_filter);
+    let failed = state
+        .rows
+        .iter()
+        .filter(|row| row.health == ServiceHealth::Critical)
+        .count();
+    let unhealthy = state
+        .rows
+        .iter()
+        .filter(|row| row.health == ServiceHealth::Warning)
+        .count();
+    let active = state
+        .rows
+        .iter()
+        .filter(|row| row.active_state == "active")
+        .count();
+    let updated = state
+        .last_updated_at
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| {
+            format!(
+                "updated {}s ago",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|now| now.as_secs().saturating_sub(d.as_secs()))
+                    .unwrap_or(0)
+            )
+        })
+        .unwrap_or_else(|| "not loaded yet".to_string());
+    let selected = rows.get(app.service_scroll as usize).cloned();
+    drop(state);
+
+    let block = Block::default()
+        .title(format!(
+            "Services ({})",
+            service_filter_label(app.service_filter)
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(6),
+            Constraint::Length(5),
+        ])
+        .split(inner);
+
+    let summary = Paragraph::new(vec![Line::from(vec![
+        Span::styled(
+            "Failed ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(failed.to_string()),
+        Span::raw("  "),
+        Span::styled(
+            "Warning ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(unhealthy.to_string()),
+        Span::raw("  "),
+        Span::styled(
+            "Active ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(active.to_string()),
+        Span::raw("  •  "),
+        Span::styled(updated, Style::default().fg(Color::Gray)),
+        if rows.is_empty() {
+            Span::styled("  •  no matching units", Style::default().fg(Color::Gray))
+        } else {
+            Span::styled(
+                format!("  •  showing {}", rows.len()),
+                Style::default().fg(Color::Gray),
+            )
+        },
+    ])]);
+    frame.render_widget(summary, chunks[0]);
+
+    let visible = chunks[1].height.saturating_sub(3) as usize;
+    let selected_idx = (app.service_scroll as usize).min(rows.len().saturating_sub(1));
+    app.service_scroll = selected_idx as u16;
+    let offset = selected_idx.saturating_sub(visible.saturating_sub(1));
+    let slice = &rows[offset..rows.len().min(offset + visible.max(1))];
+
+    let table_rows = slice.iter().enumerate().map(|(i, row)| {
+        let absolute_idx = offset + i;
+        let base_style = match row.health {
+            ServiceHealth::Critical => Style::default().fg(Color::Red),
+            ServiceHealth::Warning => Style::default().fg(Color::Yellow),
+            ServiceHealth::Healthy => Style::default().fg(Color::Green),
+        };
+        let style = if absolute_idx == selected_idx {
+            base_style
+                .bg(Color::White)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            base_style
+        };
+        Row::new(vec![
+            Cell::from(trim_to(&row.name, 26)),
+            Cell::from(format!("{} ({})", row.active_state, row.sub_state)),
+            Cell::from(row.restarts.to_string()),
+            Cell::from(trim_to(&row.last_change, 24)),
+            Cell::from(trim_to(&row.description, 28)),
+        ])
+        .style(style)
+    });
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(26),
+            Constraint::Length(20),
+            Constraint::Length(8),
+            Constraint::Length(24),
+            Constraint::Min(18),
+        ],
+    )
+    .header(
+        Row::new(vec!["UNIT", "STATE", "RESTARTS", "LAST CHANGE", "DESC"]).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(Block::default().borders(Borders::ALL).title("Units"));
+    frame.render_widget(table, chunks[1]);
+
+    let detail_lines = if let Some(row) = selected {
+        vec![
+            Line::from(vec![
+                Span::styled("Selected: ", Style::default().fg(Color::Gray)),
+                Span::raw(row.name),
+                Span::raw("  •  "),
+                Span::styled("Load ", Style::default().fg(Color::Gray)),
+                Span::raw(row.load_state),
+            ]),
+            Line::from(vec![
+                Span::styled("State: ", Style::default().fg(Color::Gray)),
+                Span::raw(format!("{} ({})", row.active_state, row.sub_state)),
+                Span::raw("  •  "),
+                Span::styled("Restarts ", Style::default().fg(Color::Gray)),
+                Span::raw(row.restarts.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled("When: ", Style::default().fg(Color::Gray)),
+                Span::raw(row.last_change),
+            ]),
+            Line::from(vec![
+                Span::styled("Hint: ", Style::default().fg(Color::Gray)),
+                Span::raw("press Enter or l to tail logs for this service"),
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from("No services match the current filter."),
+            Line::from("Press Tab to change the filter."),
+        ]
+    };
+    frame.render_widget(
+        Paragraph::new(detail_lines)
+            .block(Block::default().borders(Borders::ALL).title("Detail"))
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+}
+
+fn render_logs(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
+    let state = app.log_state.inner.lock().unwrap();
+
+    if let Some(msg) = &state.unsupported {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("Logs"),
+                Line::from(""),
+                Line::from(msg.clone()),
+                Line::from(""),
+                Line::from("On Linux this uses journalctl first and falls back to syslog."),
+            ])
+            .block(Block::default().title("Logs").borders(Borders::ALL))
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+
+    let source = if state.source.is_empty() {
+        "journalctl".to_string()
+    } else {
+        state.source.clone()
+    };
+    let lines = state.lines.clone();
+    let err = state.error.clone();
+    let running = state.running;
+    drop(state);
+
+    let block = Block::default()
+        .title("Logs")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .split(inner);
+
+    let header = Paragraph::new(vec![Line::from(vec![
+        Span::styled("Severity ", Style::default().fg(Color::Gray)),
+        Span::raw(log_severity_label(app.log_severity)),
+        Span::raw("  •  "),
+        Span::styled("Unit ", Style::default().fg(Color::Gray)),
+        Span::raw(log_unit_filter_label(
+            app.log_unit_filter,
+            app.log_selected_unit.as_deref(),
+        )),
+        Span::raw("  •  "),
+        Span::styled("Source ", Style::default().fg(Color::Gray)),
+        Span::raw(source),
+        if running {
+            Span::styled("  •  refreshing", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
+    ])]);
+    frame.render_widget(header, chunks[0]);
+
+    let body_lines = if let Some(err) = err {
+        vec![
+            Line::from(vec![
+                Span::styled("Error: ", Style::default().fg(Color::Red)),
+                Span::raw(err),
+            ]),
+            Line::from("Try switching to all units with `u` or refreshing with `r`."),
+        ]
+    } else if lines.is_empty() {
+        vec![
+            Line::from("No log lines matched the current filters."),
+            Line::from("Try `Tab` for severity or `u` for all units."),
+        ]
+    } else {
+        lines.into_iter().map(Line::from).collect::<Vec<Line>>()
+    };
+
+    let scroll = app
+        .logs_scroll
+        .min((body_lines.len().saturating_sub(chunks[1].height as usize)) as u16);
+    app.logs_scroll = scroll;
+    frame.render_widget(
+        Paragraph::new(body_lines)
+            .block(Block::default().borders(Borders::ALL).title("Recent lines"))
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false }),
+        chunks[1],
+    );
 }
 
 fn start_disk_scan(app: &mut AppState) {

@@ -16,6 +16,8 @@ You want a “what’s going on with this box?” view in ~2 seconds:
 - Disk panel: compact **df-style** overview (filtered to “real” mounts)
 - Processes view (`p`): top CPU/mem with scroll
 - Disk dive (`d`): on-demand directory sizing with drill-down into directories and large files
+- Services view (`v`, Linux): `systemd` unit health, failed services, restart counts, recent state changes
+- Logs view (`l`, Linux): `journalctl` tailing with severity and unit filters, with syslog fallback
 - Refresh rate control via CLI flag
 
 ## Install
@@ -72,6 +74,8 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - `Esc` back to dashboard
 - `p` processes
 - `d` disk dive
+- `v` services (Linux)
+- `l` logs (Linux)
 - `r` refresh now
 
 ### Contextual
@@ -80,6 +84,8 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - Dashboard: `u` downloads and installs the latest release to `~/.local/bin/ferro`
 - Processes: `Tab` toggles sort (CPU ↔ Mem)
 - Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans, `Enter` drills into a directory, `←`/`Backspace` goes up
+- Services: `Tab` cycles filters (failed ↔ unhealthy ↔ active ↔ all), `Enter`/`l` opens logs for the selected unit
+- Logs: `Tab` cycles severity (`err+` ↔ `warning+` ↔ `info+` ↔ `debug+`), `u` toggles selected unit ↔ all units
 
 ## SRE Roadmap
 Features that would make Ferromon much stronger as a sysadmin/SRE first-response tool:
