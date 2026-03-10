@@ -34,46 +34,21 @@ case "${OS}:${ARCH}" in
     ;;
 esac
 
-API_LIST="https://api.github.com/repos/${OWNER}/${REPO}/releases"
+API_LATEST="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
 
-say "→ Fetching latest release with assets for ${TARGET}…"
-need python3
-
-# Use Python to fetch + select the correct release (more reliable across shells than piping JSON).
-VER="$(python3 - "$TARGET" "$API_LIST" <<'PY'
-import json, sys
-from urllib.request import Request, urlopen
-
-if len(sys.argv) < 3:
-    print("")
-    raise SystemExit(0)
-
-target = sys.argv[1]
-url = sys.argv[2]
-
-req = Request(url, headers={"User-Agent": "ferromon-installer"})
-with urlopen(req, timeout=5) as r:
-    data = r.read().decode("utf-8", errors="replace")
-
-rels = json.loads(data)
-for rel in rels:
-    tag = rel.get("tag_name")
-    assets = rel.get("assets") or []
-    names = {a.get("name") for a in assets}
-    want = f"ferromon-{tag}-{target}.tar.gz"
-    if want in names:
-        print(tag)
-        raise SystemExit(0)
-print("")
-PY
-)"
-
-[ -n "${VER:-}" ] || die "no suitable release found for target ${TARGET}"
+say "→ Fetching latest release for ${TARGET}…"
+RELEASE_JSON="$(curl -fsSL -H "User-Agent: ferromon-installer" "$API_LATEST")" \
+  || die "failed to fetch latest release metadata"
+VER="$(printf '%s\n' "$RELEASE_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+[ -n "${VER:-}" ] || die "could not determine latest release tag"
 
 ASSET="ferromon-${VER}-${TARGET}.tar.gz"
 SHA="${ASSET}.sha256"
 URL="https://github.com/${OWNER}/${REPO}/releases/download/${VER}/${ASSET}"
 SHA_URL="https://github.com/${OWNER}/${REPO}/releases/download/${VER}/${SHA}"
+
+printf '%s\n' "$RELEASE_JSON" | grep -q "\"name\": \"$ASSET\"" \
+  || die "latest release ${VER} does not include asset ${ASSET}"
 
 TMPDIR="$(mktemp -d)"
 cleanup() { rm -rf "$TMPDIR"; }
