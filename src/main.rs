@@ -882,6 +882,7 @@ fn collect_services() -> Result<Vec<ServiceRow>, String> {
     let output = Command::new("systemctl")
         .args([
             "show",
+            "*.service",
             "--type=service",
             "--all",
             "--no-pager",
@@ -899,7 +900,10 @@ fn collect_services() -> Result<Vec<ServiceRow>, String> {
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_service_rows(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_service_rows(stdout: &str) -> Vec<ServiceRow> {
     let mut rows = Vec::new();
     for block in stdout.split("\n\n") {
         let mut name = String::new();
@@ -958,7 +962,7 @@ fn collect_services() -> Result<Vec<ServiceRow>, String> {
             row.name.clone(),
         )
     });
-    Ok(rows)
+    rows
 }
 
 fn collect_logs(
@@ -2159,6 +2163,7 @@ fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
     }
 
     let rows = filtered_service_rows(&state.rows, app.service_filter);
+    let error = state.error.clone();
     let failed = state
         .rows
         .iter()
@@ -2295,7 +2300,18 @@ fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
     .block(Block::default().borders(Borders::ALL).title("Units"));
     frame.render_widget(table, chunks[1]);
 
-    let detail_lines = if let Some(row) = selected {
+    let detail_lines = if let Some(error) = error {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    "Service refresh failed: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(error),
+            ]),
+            Line::from("Press r to retry."),
+        ]
+    } else if let Some(row) = selected {
         vec![
             Line::from(vec![
                 Span::styled("Selected: ", Style::default().fg(Color::Gray)),
@@ -2836,5 +2852,50 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KiB", b / KIB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_service_rows_extracts_service_units() {
+        let stdout = "\
+Id=sshd.service
+Description=OpenSSH server daemon
+LoadState=loaded
+ActiveState=active
+SubState=running
+NRestarts=2
+ActiveEnterTimestamp=Thu 2026-03-12 10:00:00 UTC
+InactiveEnterTimestamp=n/a
+
+Id=apt-daily.service
+Description=Daily apt download activities
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+NRestarts=0
+ActiveEnterTimestamp=Thu 2026-03-12 08:00:00 UTC
+InactiveEnterTimestamp=Thu 2026-03-12 09:00:00 UTC
+
+Id=session-1.scope
+Description=User Session
+LoadState=loaded
+ActiveState=active
+SubState=running
+NRestarts=0
+ActiveEnterTimestamp=Thu 2026-03-12 07:00:00 UTC
+InactiveEnterTimestamp=n/a
+";
+
+        let rows = parse_service_rows(stdout);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "sshd.service");
+        assert_eq!(rows[0].last_change, "Thu 2026-03-12 10:00:00…");
+        assert_eq!(rows[1].name, "apt-daily.service");
+        assert_eq!(rows[1].last_change, "Thu 2026-03-12 09:00:00…");
     }
 }
