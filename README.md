@@ -6,11 +6,9 @@
 ██║     ███████╗██║  ██║██║  ██║╚██████╔╝██║ ╚═╝ ██║╚██████╔╝██║ ╚████║
 ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 
-Forge‑Grade Terminal Monitoring
-CPU • Memory • System Insight
+                     Forge‑Grade Terminal Monitoring
+                      CPU • Memory • System Insight
 ```
-# Ferromon
-
 A fast, interactive **Rust TUI** for quick host checks.
 
 Built with **ratatui + crossterm + sysinfo**.
