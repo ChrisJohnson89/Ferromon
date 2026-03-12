@@ -152,7 +152,7 @@ impl Default for AppState {
             dash_top_mem: Vec::new(),
             dash_last_proc_at: None,
             dash_last_fs_at: None,
-            dash_show_all_mounts: false,
+            dash_show_all_mounts: true,
             footer_tip_idx: 0,
             tick_ms: 500,
             dump_snapshot: false,
@@ -1459,7 +1459,7 @@ fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot
     let used_memory = system.used_memory();
     let memory_percent = percent(used_memory, total_memory);
 
-    let disks_table = disks_table_filtered(disks, 7, show_all_mounts);
+    let disks_table = disks_table_filtered(disks, 12, show_all_mounts);
 
     VmSnapshot {
         cpu_usage,
@@ -1659,16 +1659,10 @@ fn render_dashboard(
         app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 3);
         let (label, path) = dash_target_path(app.dash_dir_target);
         app.dash_dir_sizes = scan_dir_quick(&path, 6);
-        // stash label in first line of the list for display
-        let prefix = match app.dash_dir_target {
-            DashDirTarget::Cwd => "CWD",
-            DashDirTarget::Var => "/var",
-        };
         if !app.dash_dir_sizes.is_empty() {
-            app.dash_dir_sizes
-                .insert(0, format!("{}: {}", prefix, label));
+            app.dash_dir_sizes.insert(0, label);
         } else {
-            app.dash_dir_sizes = vec![format!("{}: {}", prefix, label), "(no entries)".to_string()];
+            app.dash_dir_sizes = vec![label, "(no entries)".to_string()];
         }
         app.dash_last_fs_at = Some(now);
     }
@@ -1816,13 +1810,8 @@ fn render_dashboard(
     );
 
     // Disk
-    let disk_title = if app.dash_show_all_mounts {
-        "Disk (all mounts)"
-    } else {
-        "Disk (filtered)"
-    };
     let disk_block = Block::default()
-        .title(disk_title)
+        .title("Disk")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
     frame.render_widget(disk_block.clone(), panels[2]);
@@ -1830,68 +1819,75 @@ fn render_dashboard(
     let disk_inner = disk_block.inner(panels[2]);
     let disk_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
         .split(disk_inner);
 
+    let mounts_title = if app.dash_show_all_mounts {
+        "Mounts (all)"
+    } else {
+        "Mounts (filtered)"
+    };
     let df_rows = vm.disks_table.iter().map(|r| {
         Row::new(vec![
-            Cell::from(trim_to(&r.fs, 15)),
-            Cell::from(format_bytes(r.size)),
-            Cell::from(format_bytes(r.used)),
-            Cell::from(format_bytes(r.avail)),
-            Cell::from(format!("{:.0}%", r.use_pct)),
-            Cell::from(trim_to(&r.mount, 20)),
+            Cell::from(trim_to(&r.mount, 14)),
+            Cell::from(Span::styled(
+                format!("{:.0}%", r.use_pct),
+                Style::default().fg(color_for_pct(r.use_pct)),
+            )),
+            Cell::from(format!("{}/{}", format_bytes(r.used), format_bytes(r.size))),
+            Cell::from(trim_to(&r.fs, 14)),
         ])
     });
 
     let df = Table::new(
         df_rows,
         [
-            Constraint::Length(15),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(14),
             Constraint::Length(6),
-            Constraint::Min(10),
+            Constraint::Length(18),
+            Constraint::Min(12),
         ],
     )
     .header(
-        Row::new(vec!["FS", "Size", "Used", "Avail", "Use%", "Mount"]).style(
+        Row::new(vec!["MOUNT", "USE", "USED/TOTAL", "FS"]).style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
     )
-    .block(Block::default().borders(Borders::NONE));
+    .block(Block::default().borders(Borders::ALL).title(mounts_title));
 
     frame.render_widget(df, disk_chunks[0]);
 
+    let dir_title = match app.dash_dir_target {
+        DashDirTarget::Cwd => "CWD",
+        DashDirTarget::Var => "/var",
+    };
     let mut dir_lines: Vec<Line> = Vec::new();
-    if app.dash_dir_sizes.is_empty() {
-        dir_lines.push(Line::from(Span::styled(
-            "Dir: (no data)",
-            Style::default().fg(Color::Gray),
-        )));
-    } else {
-        // First line is a label we inject during scan.
-        let mut first = true;
-        for row in app.dash_dir_sizes.iter() {
-            if first {
-                dir_lines.push(Line::from(Span::styled(
-                    row.clone(),
-                    Style::default()
-                        .fg(Color::Gray)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                first = false;
-                continue;
-            }
+    if let Some((path, entries)) = app.dash_dir_sizes.split_first() {
+        dir_lines.push(Line::from(vec![
+            Span::styled("Path: ", Style::default().fg(Color::Gray)),
+            Span::styled(path.clone(), Style::default().fg(Color::White)),
+        ]));
+        for row in entries {
             dir_lines.push(Line::from(Span::raw(row.clone())));
         }
+    } else {
+        dir_lines.push(Line::from(Span::styled(
+            "Path: unavailable",
+            Style::default().fg(Color::Gray),
+        )));
+        dir_lines.push(Line::from(Span::styled(
+            "(no entries)",
+            Style::default().fg(Color::Gray),
+        )));
     }
 
     frame.render_widget(
-        Paragraph::new(dir_lines).alignment(Alignment::Left),
+        Paragraph::new(dir_lines)
+            .block(Block::default().borders(Borders::ALL).title(dir_title))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false }),
         disk_chunks[1],
     );
 }
