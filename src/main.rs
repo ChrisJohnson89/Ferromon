@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -115,8 +115,13 @@ struct AppState {
     dash_dir_sizes: Vec<String>,
     dash_top_cpu: Vec<String>,
     dash_top_mem: Vec<String>,
+    dash_top_cores: Vec<String>,
+    dash_mem_pressure: Vec<String>,
+    dash_cpu_history: VecDeque<u16>,
+    dash_mem_history: VecDeque<u16>,
     dash_last_proc_at: Option<Instant>,
     dash_last_fs_at: Option<Instant>,
+    dash_last_history_at: Option<Instant>,
     dash_show_all_mounts: bool,
     footer_tip_idx: u8,
     tick_ms: u64,
@@ -150,8 +155,13 @@ impl Default for AppState {
             dash_dir_sizes: Vec::new(),
             dash_top_cpu: Vec::new(),
             dash_top_mem: Vec::new(),
+            dash_top_cores: Vec::new(),
+            dash_mem_pressure: Vec::new(),
+            dash_cpu_history: VecDeque::new(),
+            dash_mem_history: VecDeque::new(),
             dash_last_proc_at: None,
             dash_last_fs_at: None,
+            dash_last_history_at: None,
             dash_show_all_mounts: true,
             footer_tip_idx: 0,
             tick_ms: 500,
@@ -1151,6 +1161,7 @@ fn run_app(
 ) -> io::Result<Option<String>> {
     // Keep the dashboard cheap: refresh processes + fs scan on a slower cadence.
     let dash_proc_every = Duration::from_secs(3);
+    let dash_history_every = tick_rate.max(Duration::from_millis(500));
     let mut tip_clock = Instant::now();
 
     loop {
@@ -1187,6 +1198,17 @@ fn run_app(
         }
 
         let vm = snapshot(system, disks, app.dash_show_all_mounts);
+        if matches!(app.screen, Screen::Dashboard) {
+            let due = app
+                .dash_last_history_at
+                .map(|t| t.elapsed() >= dash_history_every)
+                .unwrap_or(true);
+            if due {
+                push_history_sample(&mut app.dash_cpu_history, vm.cpu_usage as f64, 48);
+                push_history_sample(&mut app.dash_mem_history, vm.memory_percent, 48);
+                app.dash_last_history_at = Some(Instant::now());
+            }
+        }
 
         terminal.draw(|frame| {
             let size = frame.size();
@@ -1669,6 +1691,8 @@ fn render_dashboard(
     if need_fs {
         app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 5);
         app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 5);
+        app.dash_top_cores = format_top_cores(system, 8);
+        app.dash_mem_pressure = format_memory_pressure(system, 5);
         let (label, path) = dash_target_path(app.dash_dir_target);
         app.dash_dir_sizes = scan_dir_quick(&path, 6);
         if !app.dash_dir_sizes.is_empty() {
@@ -1687,6 +1711,14 @@ fn render_dashboard(
     frame.render_widget(cpu_block.clone(), panels[0]);
 
     let cpu_inner = cpu_block.inner(panels[0]);
+    let cpu_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(cpu_inner);
+
+    let cpu_summary_block = Block::default().borders(Borders::ALL).title("Summary");
+    frame.render_widget(cpu_summary_block.clone(), cpu_sections[0]);
+    let cpu_summary_inner = cpu_summary_block.inner(cpu_sections[0]);
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1694,7 +1726,7 @@ fn render_dashboard(
             Constraint::Length(1),
             Constraint::Min(0),
         ])
-        .split(cpu_inner);
+        .split(cpu_summary_inner);
 
     let cpu_pct_color = color_for_pct(vm.cpu_usage as f64);
     let cpu_lines = vec![
@@ -1749,11 +1781,35 @@ fn render_dashboard(
                 Span::raw(row.clone()),
             ]));
         }
+        if !app.dash_top_cores.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "Top cores",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            for row in &app.dash_top_cores {
+                lines.push(Line::from(row.clone()));
+            }
+        }
         lines
     };
     frame.render_widget(
         Paragraph::new(cpu_bottom).alignment(Alignment::Left),
         cpu_chunks[2],
+    );
+
+    render_detail_panel(
+        frame,
+        cpu_sections[1],
+        "Signals",
+        vec![
+            format!("Now {:.1}%", vm.cpu_usage),
+            format!("Peak {}%", history_peak(&app.dash_cpu_history)),
+            format!("Recent avg {:.1}%", history_average(&app.dash_cpu_history)),
+            format!("Headroom {:.1}%", (100.0 - vm.cpu_usage as f64).max(0.0)),
+        ],
     );
 
     // Memory
@@ -1764,6 +1820,14 @@ fn render_dashboard(
     frame.render_widget(memory_block.clone(), panels[1]);
 
     let memory_inner = memory_block.inner(panels[1]);
+    let memory_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(memory_inner);
+
+    let memory_summary_block = Block::default().borders(Borders::ALL).title("Summary");
+    frame.render_widget(memory_summary_block.clone(), memory_sections[0]);
+    let memory_summary_inner = memory_summary_block.inner(memory_sections[0]);
     let memory_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1771,7 +1835,7 @@ fn render_dashboard(
             Constraint::Length(1),
             Constraint::Min(0),
         ])
-        .split(memory_inner);
+        .split(memory_summary_inner);
 
     let mem_pct_color = color_for_pct(vm.memory_percent);
     let memory_lines = vec![
@@ -1845,12 +1909,42 @@ fn render_dashboard(
                 Span::raw(row.clone()),
             ]));
         }
+        if !app.dash_mem_pressure.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "Pressure",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            for row in &app.dash_mem_pressure {
+                lines.push(Line::from(row.clone()));
+            }
+        }
         lines
     };
     frame.render_widget(
         Paragraph::new(mem_bottom).alignment(Alignment::Left),
         memory_chunks[2],
     );
+
+    let mut memory_signals = vec![
+        format!("Now {:.1}%", vm.memory_percent),
+        format!("Peak {}%", history_peak(&app.dash_mem_history)),
+        format!("Recent avg {:.1}%", history_average(&app.dash_mem_history)),
+        format!("Headroom {}", format_bytes(vm.available_memory)),
+    ];
+    memory_signals.push(if vm.total_swap > 0 {
+        format!(
+            "Swap {:.0}% ({}/{})",
+            percent(vm.used_swap, vm.total_swap),
+            format_bytes(vm.used_swap),
+            format_bytes(vm.total_swap)
+        )
+    } else {
+        "Swap off".to_string()
+    });
+    render_detail_panel(frame, memory_sections[1], "Signals", memory_signals);
 
     // Disk
     let disk_block = Block::default()
@@ -2816,6 +2910,85 @@ fn format_top_processes(system: &System, sort: ProcSort, count: usize) -> Vec<St
             format!("{}  {}  {}", trim_to(&p.name, 18), cpu, mem)
         })
         .collect()
+}
+
+fn format_top_cores(system: &System, count: usize) -> Vec<String> {
+    let mut cores: Vec<(usize, f32)> = system
+        .cpus()
+        .iter()
+        .enumerate()
+        .map(|(idx, cpu)| (idx, cpu.cpu_usage()))
+        .collect();
+    cores.sort_by_key(|(_, usage)| Reverse((*usage * 10.0) as i32));
+
+    let items: Vec<String> = cores
+        .into_iter()
+        .take(count)
+        .map(|(idx, usage)| format!("c{} {:.0}%", idx, usage))
+        .collect();
+
+    items.chunks(4).map(|chunk| chunk.join("  ")).collect()
+}
+
+fn format_memory_pressure(system: &System, top_n: usize) -> Vec<String> {
+    let total_memory = system.total_memory();
+    let available_memory = system.available_memory();
+    let total_swap = system.total_swap();
+    let used_swap = system.used_swap();
+    let available_pct = percent(available_memory, total_memory);
+    let swap_pct = percent(used_swap, total_swap);
+
+    let mut procs: Vec<ProcRow> = system
+        .processes()
+        .iter()
+        .map(|(pid, p)| ProcRow::from_process(*pid, p))
+        .collect();
+    procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64)));
+    let top_total: u64 = procs.into_iter().take(top_n).map(|p| p.mem_bytes).sum();
+
+    vec![
+        format!("Top {top_n} using {}", format_bytes(top_total)),
+        format!("Avail {:.0}% of RAM", available_pct),
+        if total_swap > 0 {
+            format!("Swap {:.0}% in use", swap_pct)
+        } else {
+            "Swap off".to_string()
+        },
+    ]
+}
+
+fn push_history_sample(history: &mut VecDeque<u16>, value: f64, max_len: usize) {
+    history.push_back(value.round().clamp(0.0, 100.0) as u16);
+    while history.len() > max_len {
+        history.pop_front();
+    }
+}
+
+fn history_peak(history: &VecDeque<u16>) -> u16 {
+    history.iter().copied().max().unwrap_or(0)
+}
+
+fn history_average(history: &VecDeque<u16>) -> f64 {
+    if history.is_empty() {
+        0.0
+    } else {
+        history.iter().map(|sample| *sample as u64).sum::<u64>() as f64 / history.len() as f64
+    }
+}
+
+fn render_detail_panel(frame: &mut ratatui::Frame, area: Rect, title: &str, lines: Vec<String>) {
+    let block = Block::default().borders(Borders::ALL).title(title);
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>())
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Left),
+        inner,
+    );
 }
 
 fn dash_target_path(target: DashDirTarget) -> (String, PathBuf) {
