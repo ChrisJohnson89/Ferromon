@@ -88,7 +88,7 @@ ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
 - `r` refresh now
 
 ### Contextual
-- Dashboard: `Tab` toggles dir target (CWD ↔ /var), `f` toggles mount filter (filtered ↔ all)
+- Dashboard: `Tab` cycles dir target (CWD ↔ /var ↔ home ↔ /), `f` toggles mount filter (filtered ↔ all)
 - Dashboard: `x` prints a text snapshot to stdout and exits
 - Dashboard: `u` downloads and installs the latest release to `~/.local/bin/ferro`
 - Processes: `Tab` toggles sort (CPU ↔ Mem)

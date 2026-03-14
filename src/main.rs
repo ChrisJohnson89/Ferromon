@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use tar::Archive;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -62,6 +63,28 @@ enum DashDirTarget {
     #[default]
     Cwd,
     Var,
+    Home,
+    Root,
+}
+
+impl DashDirTarget {
+    fn next(self) -> Self {
+        match self {
+            DashDirTarget::Cwd => DashDirTarget::Var,
+            DashDirTarget::Var => DashDirTarget::Home,
+            DashDirTarget::Home => DashDirTarget::Root,
+            DashDirTarget::Root => DashDirTarget::Cwd,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            DashDirTarget::Cwd => "CWD",
+            DashDirTarget::Var => "/var",
+            DashDirTarget::Home => "HOME",
+            DashDirTarget::Root => "/",
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +124,8 @@ struct AppState {
     disk_scan: DiskScan,
     service_scroll: u16,
     service_filter: ServiceFilter,
+    service_search: String,
+    service_search_active: bool,
     service_state: ServiceState,
     service_last_refresh_at: Option<Instant>,
     logs_scroll: u16,
@@ -144,6 +169,8 @@ impl Default for AppState {
             disk_scan: DiskScan::default(),
             service_scroll: 0,
             service_filter: ServiceFilter::default(),
+            service_search: String::new(),
+            service_search_active: false,
             service_state: ServiceState::default(),
             service_last_refresh_at: None,
             logs_scroll: 0,
@@ -1126,13 +1153,86 @@ fn log_unit_filter_label(filter: LogUnitFilter, selected_unit: Option<&str>) -> 
     }
 }
 
-fn filtered_service_rows(rows: &[ServiceRow], filter: ServiceFilter) -> Vec<ServiceRow> {
+fn is_text_input_key(key: &KeyEvent) -> bool {
+    key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+}
+
+fn handle_service_search_key(app: &mut AppState, key: &KeyEvent) -> bool {
+    if !matches!(app.screen, Screen::Services) {
+        return false;
+    }
+
+    if app.service_search_active {
+        match key.code {
+            KeyCode::Enter => {
+                app.service_search_active = false;
+                true
+            }
+            KeyCode::Esc => {
+                if app.service_search.is_empty() {
+                    app.service_search_active = false;
+                } else {
+                    app.service_search.clear();
+                    app.service_search_active = false;
+                    app.service_scroll = 0;
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                if app.service_search.is_empty() {
+                    app.service_search_active = false;
+                } else {
+                    app.service_search.pop();
+                    app.service_scroll = 0;
+                }
+                true
+            }
+            KeyCode::Char(c) if is_text_input_key(key) => {
+                app.service_search.push(c);
+                app.service_scroll = 0;
+                true
+            }
+            _ => false,
+        }
+    } else {
+        match key.code {
+            KeyCode::Char('/') if is_text_input_key(key) => {
+                app.service_search_active = true;
+                true
+            }
+            KeyCode::Esc if !app.service_search.is_empty() => {
+                app.service_search.clear();
+                app.service_scroll = 0;
+                true
+            }
+            KeyCode::Backspace if !app.service_search.is_empty() => {
+                app.service_search.pop();
+                app.service_scroll = 0;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn filtered_service_rows(
+    rows: &[ServiceRow],
+    filter: ServiceFilter,
+    search: &str,
+) -> Vec<ServiceRow> {
+    let search = search.trim().to_ascii_lowercase();
     rows.iter()
-        .filter(|row| match filter {
-            ServiceFilter::Failed => row.health == ServiceHealth::Critical,
-            ServiceFilter::Unhealthy => row.health != ServiceHealth::Healthy,
-            ServiceFilter::Active => row.active_state == "active",
-            ServiceFilter::All => true,
+        .filter(|row| {
+            let filter_match = match filter {
+                ServiceFilter::Failed => row.health == ServiceHealth::Critical,
+                ServiceFilter::Unhealthy => row.health != ServiceHealth::Healthy,
+                ServiceFilter::Active => row.active_state == "active",
+                ServiceFilter::All => true,
+            };
+            let search_match = search.is_empty()
+                || row.name.to_ascii_lowercase().contains(&search)
+                || row.description.to_ascii_lowercase().contains(&search);
+            filter_match && search_match
         })
         .cloned()
         .collect()
@@ -1140,7 +1240,7 @@ fn filtered_service_rows(rows: &[ServiceRow], filter: ServiceFilter) -> Vec<Serv
 
 fn selected_service(app: &AppState) -> Option<ServiceRow> {
     let state = app.service_state.inner.lock().unwrap();
-    let rows = filtered_service_rows(&state.rows, app.service_filter);
+    let rows = filtered_service_rows(&state.rows, app.service_filter, &app.service_search);
     rows.get(app.service_scroll as usize).cloned()
 }
 
@@ -1276,6 +1376,10 @@ fn run_app(
                     continue;
                 }
 
+                if handle_service_search_key(app, &key) {
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => return Ok(None),
                     KeyCode::Char('?') => app.show_help = !app.show_help,
@@ -1364,10 +1468,7 @@ fn run_app(
                     // Tab is contextual.
                     KeyCode::Tab => {
                         if matches!(app.screen, Screen::Dashboard) {
-                            app.dash_dir_target = match app.dash_dir_target {
-                                DashDirTarget::Cwd => DashDirTarget::Var,
-                                DashDirTarget::Var => DashDirTarget::Cwd,
-                            };
+                            app.dash_dir_target = app.dash_dir_target.next();
                             // Force refresh of quick scan.
                             app.dash_last_fs_at = None;
                         } else if matches!(app.screen, Screen::DiskDive) {
@@ -1508,7 +1609,10 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
         Screen::Dashboard => ("Dashboard", "p: processes  d: disk  v: services  l: logs"),
         Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
         Screen::DiskDive => ("Disk dive", "s: scan  Enter: open dir  ←: up  Tab: target"),
-        Screen::Services => ("Services", "Tab: filter  Enter/l: logs  r: refresh"),
+        Screen::Services => (
+            "Services",
+            "Tab: filter  /: search  Enter/l: logs  r: refresh",
+        ),
         Screen::Logs => ("Logs", "Tab: severity  u: unit filter  r: refresh"),
     };
 
@@ -1538,7 +1642,7 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
 
 fn render_footer(app: &AppState) -> Paragraph<'static> {
     let tips_dashboard = [
-        "Tab: toggle dir target (CWD ↔ /var)",
+        "Tab: cycle dir target (CWD ↔ /var ↔ HOME ↔ /)",
         "f: toggle mount filter (filtered ↔ all)",
         "p: processes · d: disk dive · v: services · l: logs",
         "r: refresh now · ?: help",
@@ -1556,6 +1660,8 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
 
     let tips_services = [
         "Tab: filter failed/unhealthy/active/all",
+        "/: search unit or description",
+        "Esc clears search, then returns to dashboard",
         "Enter or l: open logs for selected unit",
         "↑/↓: select unit · r: refresh",
     ];
@@ -1622,7 +1728,9 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
             lines.push(Line::from("  p — processes"));
             lines.push(Line::from("  d — disk dive"));
             lines.push(Line::from("  f — toggle mount filter (filtered ↔ all)"));
-            lines.push(Line::from("  Tab — toggle dir target (CWD ↔ /var)"));
+            lines.push(Line::from(
+                "  Tab — cycle dir target (CWD ↔ /var ↔ HOME ↔ /)",
+            ));
         }
         Screen::Processes => {
             lines.push(Line::from("Processes:"));
@@ -1641,6 +1749,10 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
             lines.push(Line::from("Services (Linux-only):"));
             lines.push(Line::from(
                 "  Tab — cycle filters (failed ↔ unhealthy ↔ active ↔ all)",
+            ));
+            lines.push(Line::from("  / — search by service name or description"));
+            lines.push(Line::from(
+                "  Backspace — edit search · Esc — clear search/back",
             ));
             lines.push(Line::from("  ↑/↓ — select service"));
             lines.push(Line::from("  Enter / l — open logs for selected unit"));
@@ -2006,10 +2118,7 @@ fn render_dashboard(
 
     frame.render_widget(df, disk_chunks[0]);
 
-    let dir_title = match app.dash_dir_target {
-        DashDirTarget::Cwd => "CWD",
-        DashDirTarget::Var => "/var",
-    };
+    let dir_title = app.dash_dir_target.title();
     let mut dir_lines: Vec<Line> = Vec::new();
     if let Some((path, entries)) = app.dash_dir_sizes.split_first() {
         dir_lines.push(Line::from(vec![
@@ -2305,7 +2414,7 @@ fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
         return;
     }
 
-    let rows = filtered_service_rows(&state.rows, app.service_filter);
+    let rows = filtered_service_rows(&state.rows, app.service_filter, &app.service_search);
     let error = state.error.clone();
     let failed = state
         .rows
@@ -2339,11 +2448,23 @@ fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
     let selected = rows.get(app.service_scroll as usize).cloned();
     drop(state);
 
+    let title = if app.service_search_active {
+        format!(
+            "Services ({})  /{}_",
+            service_filter_label(app.service_filter),
+            trim_to(&app.service_search, 18)
+        )
+    } else if app.service_search.is_empty() {
+        format!("Services ({})", service_filter_label(app.service_filter))
+    } else {
+        format!(
+            "Services ({})  /{}",
+            service_filter_label(app.service_filter),
+            trim_to(&app.service_search, 18)
+        )
+    };
     let block = Block::default()
-        .title(format!(
-            "Services ({})",
-            service_filter_label(app.service_filter)
-        ))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
     frame.render_widget(block.clone(), area);
@@ -2381,6 +2502,19 @@ fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
         Span::raw(active.to_string()),
         Span::raw("  •  "),
         Span::styled(updated, Style::default().fg(Color::Gray)),
+        if app.service_search_active {
+            Span::styled(
+                format!("  •  typing /{}", trim_to(&app.service_search, 20)),
+                Style::default().fg(Color::Gray),
+            )
+        } else if app.service_search.is_empty() {
+            Span::raw("")
+        } else {
+            Span::styled(
+                format!("  •  search /{}", trim_to(&app.service_search, 20)),
+                Style::default().fg(Color::Gray),
+            )
+        },
         if rows.is_empty() {
             Span::styled("  •  no matching units", Style::default().fg(Color::Gray))
         } else {
@@ -2480,10 +2614,17 @@ fn render_services(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
             ]),
         ]
     } else {
-        vec![
-            Line::from("No services match the current filter."),
-            Line::from("Press Tab to change the filter."),
-        ]
+        let mut lines = vec![Line::from("No services match the current filter.")];
+        if !app.service_search.is_empty() {
+            lines.push(Line::from(format!("Search: /{}", app.service_search)));
+            lines.push(Line::from("Press Backspace or Esc to clear the search."));
+        } else {
+            lines.push(Line::from(
+                "Press / to search by service name or description.",
+            ));
+        }
+        lines.push(Line::from("Press Tab to change the filter."));
+        lines
     };
     frame.render_widget(
         Paragraph::new(detail_lines)
@@ -3136,6 +3277,14 @@ fn dash_target_path(target: DashDirTarget) -> (String, PathBuf) {
             (label, p)
         }
         DashDirTarget::Var => ("/var".to_string(), PathBuf::from("/var")),
+        DashDirTarget::Home => {
+            let p = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            let label = p.to_string_lossy().to_string();
+            (label, p)
+        }
+        DashDirTarget::Root => ("/".to_string(), PathBuf::from("/")),
     }
 }
 
@@ -3246,5 +3395,53 @@ InactiveEnterTimestamp=n/a
         assert_eq!(rows[0].last_change, "Thu 2026-03-12 10:00:00…");
         assert_eq!(rows[1].name, "apt-daily.service");
         assert_eq!(rows[1].last_change, "Thu 2026-03-12 09:00:00…");
+    }
+
+    #[test]
+    fn filtered_service_rows_respects_search_query() {
+        let rows = vec![
+            ServiceRow {
+                name: "sshd.service".to_string(),
+                description: "OpenSSH server daemon".to_string(),
+                load_state: "loaded".to_string(),
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                restarts: 0,
+                last_change: "-".to_string(),
+                health: ServiceHealth::Healthy,
+            },
+            ServiceRow {
+                name: "nginx.service".to_string(),
+                description: "High performance web server".to_string(),
+                load_state: "loaded".to_string(),
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                restarts: 0,
+                last_change: "-".to_string(),
+                health: ServiceHealth::Healthy,
+            },
+        ];
+
+        let rows = filtered_service_rows(&rows, ServiceFilter::All, "ssh");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "sshd.service");
+    }
+
+    #[test]
+    fn dashboard_dir_target_cycles_all_targets() {
+        let mut target = DashDirTarget::Cwd;
+
+        target = target.next();
+        assert_eq!(target, DashDirTarget::Var);
+
+        target = target.next();
+        assert_eq!(target, DashDirTarget::Home);
+
+        target = target.next();
+        assert_eq!(target, DashDirTarget::Root);
+
+        target = target.next();
+        assert_eq!(target, DashDirTarget::Cwd);
     }
 }
