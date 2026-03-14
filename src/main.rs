@@ -1444,9 +1444,13 @@ struct DiskRow {
 struct VmSnapshot {
     cpu_usage: f32,
     cpu_cores: usize,
+    load_avg_one: f64,
     total_memory: u64,
     used_memory: u64,
+    available_memory: u64,
     memory_percent: f64,
+    total_swap: u64,
+    used_swap: u64,
 
     disks_table: Vec<DiskRow>,
 }
@@ -1454,19 +1458,27 @@ struct VmSnapshot {
 fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot {
     let cpu_usage = system.global_cpu_info().cpu_usage();
     let cpu_cores = system.cpus().len();
+    let load_avg_one = System::load_average().one;
     // sysinfo reports memory in bytes
     let total_memory = system.total_memory();
     let used_memory = system.used_memory();
+    let available_memory = system.available_memory();
     let memory_percent = percent(used_memory, total_memory);
+    let total_swap = system.total_swap();
+    let used_swap = system.used_swap();
 
     let disks_table = disks_table_filtered(disks, 12, show_all_mounts);
 
     VmSnapshot {
         cpu_usage,
         cpu_cores,
+        load_avg_one,
         total_memory,
         used_memory,
+        available_memory,
         memory_percent,
+        total_swap,
+        used_swap,
         disks_table,
     }
 }
@@ -1655,8 +1667,8 @@ fn render_dashboard(
     };
 
     if need_fs {
-        app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 3);
-        app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 3);
+        app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 5);
+        app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 5);
         let (label, path) = dash_target_path(app.dash_dir_target);
         app.dash_dir_sizes = scan_dir_quick(&path, 6);
         if !app.dash_dir_sizes.is_empty() {
@@ -1678,22 +1690,29 @@ fn render_dashboard(
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(6),
+            Constraint::Length(4),
+            Constraint::Length(1),
             Constraint::Min(0),
         ])
         .split(cpu_inner);
 
+    let cpu_pct_color = color_for_pct(vm.cpu_usage as f64);
     let cpu_lines = vec![
         Line::from(vec![
-            Span::styled("Used: ", Style::default().fg(Color::Gray)),
+            Span::styled("CPU ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.cpu_usage),
-                Style::default().fg(Color::White),
+                Style::default().fg(cpu_pct_color),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Cores: ", Style::default().fg(Color::Gray)),
+            Span::styled("Load ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.2}", vm.load_avg_one),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("  "),
+            Span::styled("Cores ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", vm.cpu_cores),
                 Style::default().fg(Color::White),
@@ -1704,9 +1723,10 @@ fn render_dashboard(
     frame.render_widget(cpu_paragraph, cpu_chunks[0]);
 
     let cpu_gauge = Gauge::default()
-        .gauge_style(Style::default().fg(color_for_pct(vm.cpu_usage as f64)))
+        .gauge_style(Style::default().fg(cpu_pct_color))
+        .label("")
         .ratio(((vm.cpu_usage as f64) / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(cpu_gauge, cpu_chunks[2]);
+    frame.render_widget(cpu_gauge, cpu_chunks[1]);
 
     let cpu_bottom = if app.dash_top_cpu.is_empty() {
         vec![Line::from(Span::styled(
@@ -1733,7 +1753,7 @@ fn render_dashboard(
     };
     frame.render_widget(
         Paragraph::new(cpu_bottom).alignment(Alignment::Left),
-        cpu_chunks[1],
+        cpu_chunks[2],
     );
 
     // Memory
@@ -1747,28 +1767,50 @@ fn render_dashboard(
     let memory_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(6),
+            Constraint::Length(4),
+            Constraint::Length(1),
             Constraint::Min(0),
         ])
         .split(memory_inner);
 
+    let mem_pct_color = color_for_pct(vm.memory_percent);
     let memory_lines = vec![
         Line::from(vec![
-            Span::styled("Used: ", Style::default().fg(Color::Gray)),
+            Span::styled("Mem ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!(
                     "{} / {}",
                     format_bytes(vm.used_memory),
                     format_bytes(vm.total_memory)
                 ),
-                Style::default().fg(Color::White),
+                Style::default().fg(mem_pct_color),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Usage: ", Style::default().fg(Color::Gray)),
+            Span::styled("Avail ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format_bytes(vm.available_memory),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("  "),
+            Span::styled("Use ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.memory_percent),
+                Style::default().fg(mem_pct_color),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Swap ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if vm.total_swap > 0 {
+                    format!(
+                        "{}/{}",
+                        format_bytes(vm.used_swap),
+                        format_bytes(vm.total_swap)
+                    )
+                } else {
+                    "off".to_string()
+                },
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -1777,9 +1819,10 @@ fn render_dashboard(
     frame.render_widget(memory_paragraph, memory_chunks[0]);
 
     let memory_gauge = Gauge::default()
-        .gauge_style(Style::default().fg(color_for_pct(vm.memory_percent)))
+        .gauge_style(Style::default().fg(mem_pct_color))
+        .label("")
         .ratio((vm.memory_percent / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(memory_gauge, memory_chunks[2]);
+    frame.render_widget(memory_gauge, memory_chunks[1]);
 
     let mem_bottom = if app.dash_top_mem.is_empty() {
         vec![Line::from(Span::styled(
@@ -1806,7 +1849,7 @@ fn render_dashboard(
     };
     frame.render_widget(
         Paragraph::new(mem_bottom).alignment(Alignment::Left),
-        memory_chunks[1],
+        memory_chunks[2],
     );
 
     // Disk
