@@ -22,7 +22,7 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
@@ -113,6 +113,7 @@ struct AppState {
     // Dashboard caches (quick overview)
     dash_dir_target: DashDirTarget,
     dash_dir_sizes: Vec<String>,
+    dash_mount_rows: Vec<DiskRow>,
     dash_top_cpu: Vec<String>,
     dash_top_mem: Vec<String>,
     dash_top_cores: Vec<String>,
@@ -153,6 +154,7 @@ impl Default for AppState {
             log_selected_unit: None,
             dash_dir_target: DashDirTarget::default(),
             dash_dir_sizes: Vec::new(),
+            dash_mount_rows: Vec::new(),
             dash_top_cpu: Vec::new(),
             dash_top_mem: Vec::new(),
             dash_top_cores: Vec::new(),
@@ -1197,7 +1199,7 @@ fn run_app(
             }
         }
 
-        let vm = snapshot(system, disks, app.dash_show_all_mounts);
+        let vm = snapshot(system);
         if matches!(app.screen, Screen::Dashboard) {
             let due = app
                 .dash_last_history_at
@@ -1234,7 +1236,7 @@ fn run_app(
 
             // Main
             match app.screen {
-                Screen::Dashboard => render_dashboard(frame, rows[1], &vm, app, system),
+                Screen::Dashboard => render_dashboard(frame, rows[1], &vm, app, system, disks),
                 Screen::Processes => render_processes(frame, rows[1], app, system),
                 Screen::DiskDive => render_disk_dive(frame, rows[1], app),
                 Screen::Services => render_services(frame, rows[1], app),
@@ -1425,6 +1427,7 @@ fn run_app(
                     KeyCode::Char('f') => {
                         if matches!(app.screen, Screen::Dashboard) {
                             app.dash_show_all_mounts = !app.dash_show_all_mounts;
+                            app.dash_last_fs_at = None;
                         }
                     }
                     KeyCode::Char('x') => {
@@ -1473,11 +1476,9 @@ struct VmSnapshot {
     memory_percent: f64,
     total_swap: u64,
     used_swap: u64,
-
-    disks_table: Vec<DiskRow>,
 }
 
-fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot {
+fn snapshot(system: &System) -> VmSnapshot {
     let cpu_usage = system.global_cpu_info().cpu_usage();
     let cpu_cores = system.cpus().len();
     let load_avg_one = System::load_average().one;
@@ -1489,8 +1490,6 @@ fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot
     let total_swap = system.total_swap();
     let used_swap = system.used_swap();
 
-    let disks_table = disks_table_filtered(disks, 12, show_all_mounts);
-
     VmSnapshot {
         cpu_usage,
         cpu_cores,
@@ -1501,7 +1500,6 @@ fn snapshot(system: &System, disks: &Disks, show_all_mounts: bool) -> VmSnapshot
         memory_percent,
         total_swap,
         used_swap,
-        disks_table,
     }
 }
 
@@ -1670,6 +1668,7 @@ fn render_dashboard(
     vm: &VmSnapshot,
     app: &mut AppState,
     system: &System,
+    disks: &Disks,
 ) {
     let panels = Layout::default()
         .direction(Direction::Horizontal)
@@ -1693,6 +1692,8 @@ fn render_dashboard(
         app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 5);
         app.dash_top_cores = format_top_cores(system, 8);
         app.dash_mem_pressure = format_memory_pressure(system, 5);
+        app.dash_mount_rows = collect_mount_rows(12, app.dash_show_all_mounts)
+            .unwrap_or_else(|| disks_table_filtered(disks, 12, app.dash_show_all_mounts));
         let (label, path) = dash_target_path(app.dash_dir_target);
         app.dash_dir_sizes = scan_dir_quick(&path, 6);
         if !app.dash_dir_sizes.is_empty() {
@@ -1810,6 +1811,8 @@ fn render_dashboard(
             format!("Recent avg {:.1}%", history_average(&app.dash_cpu_history)),
             format!("Headroom {:.1}%", (100.0 - vm.cpu_usage as f64).max(0.0)),
         ],
+        &app.dash_cpu_history,
+        cpu_pct_color,
     );
 
     // Memory
@@ -1944,7 +1947,14 @@ fn render_dashboard(
     } else {
         "Swap off".to_string()
     });
-    render_detail_panel(frame, memory_sections[1], "Signals", memory_signals);
+    render_detail_panel(
+        frame,
+        memory_sections[1],
+        "Signals",
+        memory_signals,
+        &app.dash_mem_history,
+        mem_pct_color,
+    );
 
     // Disk
     let disk_block = Block::default()
@@ -1956,7 +1966,7 @@ fn render_dashboard(
     let disk_inner = disk_block.inner(panels[2]);
     let disk_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
         .split(disk_inner);
 
     let mounts_title = if app.dash_show_all_mounts {
@@ -1964,7 +1974,7 @@ fn render_dashboard(
     } else {
         "Mounts (filtered)"
     };
-    let df_rows = vm.disks_table.iter().map(|r| {
+    let df_rows = app.dash_mount_rows.iter().map(|r| {
         Row::new(vec![
             Cell::from(trim_to(&r.mount, 14)),
             Cell::from(Span::styled(
@@ -2802,7 +2812,12 @@ fn format_snapshot(vm: &VmSnapshot, app: &AppState, system: &System, disks: &Dis
     }
     out.push("".to_string());
 
-    let disk_rows = disks_table_filtered(disks, 12, app.dash_show_all_mounts);
+    let disk_rows = if app.dash_mount_rows.is_empty() {
+        collect_mount_rows(12, app.dash_show_all_mounts)
+            .unwrap_or_else(|| disks_table_filtered(disks, 12, app.dash_show_all_mounts))
+    } else {
+        app.dash_mount_rows.clone()
+    };
     out.push(if app.dash_show_all_mounts {
         "Filesystems (all):".to_string()
     } else {
@@ -2842,6 +2857,98 @@ fn color_for_pct(pct: f64) -> Color {
     }
 }
 
+fn collect_mount_rows(limit: usize, show_all: bool) -> Option<Vec<DiskRow>> {
+    let output = Command::new("df").args(["-kP"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut seen_mounts: HashSet<String> = HashSet::new();
+    let mut rows: Vec<DiskRow> = stdout
+        .lines()
+        .skip(1)
+        .filter_map(parse_df_row)
+        .filter(|row| seen_mounts.insert(row.mount.clone()))
+        .filter(|row| show_all || !should_hide_mount_row(row))
+        .collect();
+
+    if !show_all {
+        rows.sort_by_key(|row| {
+            (
+                Reverse((row.use_pct * 10.0) as i64),
+                Reverse(row.size),
+                row.mount.clone(),
+            )
+        });
+    }
+    rows.truncate(limit);
+    Some(rows)
+}
+
+fn parse_df_row(line: &str) -> Option<DiskRow> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 6 {
+        return None;
+    }
+
+    let numeric_idx = parts.len().saturating_sub(5);
+    let size = parts[numeric_idx].parse::<u64>().ok()?.saturating_mul(1024);
+    let used = parts[numeric_idx + 1]
+        .parse::<u64>()
+        .ok()?
+        .saturating_mul(1024);
+    let avail = parts[numeric_idx + 2]
+        .parse::<u64>()
+        .ok()?
+        .saturating_mul(1024);
+    let use_pct = parts[numeric_idx + 3]
+        .trim_end_matches('%')
+        .parse::<f64>()
+        .ok()
+        .unwrap_or_else(|| percent(used, size));
+
+    Some(DiskRow {
+        fs: parts[..numeric_idx].join(" "),
+        size,
+        used,
+        avail,
+        use_pct,
+        mount: parts[numeric_idx + 4..].join(" "),
+    })
+}
+
+fn should_hide_mount_row(row: &DiskRow) -> bool {
+    let fs_l = row.fs.to_lowercase();
+    if fs_l.contains("tmpfs")
+        || fs_l.contains("udev")
+        || fs_l.contains("devtmpfs")
+        || fs_l == "devfs"
+        || fs_l.starts_with("map ")
+    {
+        return true;
+    }
+
+    if row.mount.starts_with("/run")
+        || row.mount.starts_with("/dev")
+        || row.mount.starts_with("/sys")
+    {
+        return true;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if row.mount.starts_with("/System/Volumes/")
+            && row.mount != "/System/Volumes/Data"
+            && row.mount != "/System/Volumes/VM"
+        {
+            return true;
+        }
+    }
+
+    row.size == 0
+}
+
 fn disks_table_filtered(disks: &Disks, limit: usize, show_all: bool) -> Vec<DiskRow> {
     // Filter noisy mounts (tmpfs/udev/ramfs, etc.) and show the real stuff.
     let mut seen_mounts: HashSet<String> = HashSet::new();
@@ -2860,26 +2967,20 @@ fn disks_table_filtered(disks: &Disks, limit: usize, show_all: bool) -> Vec<Disk
         let used = total.saturating_sub(avail);
         let pct = percent(used, total);
 
-        // Heuristic: hide pseudo filesystems by name/mount (unless show_all is true).
-        // This is intentionally simple; if it hides something useful we can tune.
-        if !show_all {
-            let fs_l = fs.to_lowercase();
-            if fs_l.contains("tmpfs") || fs_l.contains("udev") || fs_l.contains("devtmpfs") {
-                continue;
-            }
-            if mount.starts_with("/run") || mount.starts_with("/dev") || mount.starts_with("/sys") {
-                continue;
-            }
-        }
-
-        rows.push(DiskRow {
+        let row = DiskRow {
             fs,
             size: total,
             used,
             avail,
             use_pct: pct,
             mount,
-        });
+        };
+
+        if !show_all && should_hide_mount_row(&row) {
+            continue;
+        }
+
+        rows.push(row);
     }
 
     // Biggest first.
@@ -2976,19 +3077,55 @@ fn history_average(history: &VecDeque<u16>) -> f64 {
     }
 }
 
-fn render_detail_panel(frame: &mut ratatui::Frame, area: Rect, title: &str, lines: Vec<String>) {
+fn render_detail_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    title: &str,
+    lines: Vec<String>,
+    history: &VecDeque<u16>,
+    color: Color,
+) {
     let block = Block::default().borders(Borders::ALL).title(title);
     frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(lines.len() as u16), Constraint::Min(1)])
+        .split(inner);
+
     frame.render_widget(
         Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>())
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Left),
-        inner,
+        chunks[0],
     );
+
+    let data: Vec<u64> = history.iter().map(|sample| *sample as u64).collect();
+    if !data.is_empty() && chunks[1].width > 0 && chunks[1].height > 0 {
+        let spark_color = history
+            .back()
+            .map(|sample| color_for_pct(*sample as f64))
+            .unwrap_or(color);
+        let spark_width = chunks[1].width.min(data.len() as u16);
+        let spark_x = chunks[1].x + (chunks[1].width.saturating_sub(spark_width)) / 2;
+        let spark_area = Rect {
+            x: spark_x,
+            y: chunks[1].y,
+            width: spark_width,
+            height: chunks[1].height,
+        };
+        frame.render_widget(
+            Sparkline::default()
+                .data(&data)
+                .max(100)
+                .style(Style::default().fg(spark_color)),
+            spark_area,
+        );
+    }
 }
 
 fn dash_target_path(target: DashDirTarget) -> (String, PathBuf) {
