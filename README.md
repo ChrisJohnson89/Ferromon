@@ -46,7 +46,7 @@ Grab the right archive from **GitHub Releases**, extract, and place `ferro` on y
 Example (Linux x86_64):
 ```bash
 # pick a version from: https://github.com/ChrisJohnson89/Ferromon/releases
-VER=v0.3.10
+VER=v0.3.11
 TARGET=x86_64-unknown-linux-gnu
 curl -L -o ferromon.tar.gz "https://github.com/ChrisJohnson89/Ferromon/releases/download/${VER}/ferromon-${VER}-${TARGET}.tar.gz"
 
