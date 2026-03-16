@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use sha2::{Digest, Sha256};
 use tar::Archive;
 
 use crossterm::event::{
@@ -560,11 +561,14 @@ fn perform_self_update(latest_tag: &str) -> Result<String, String> {
         .split_whitespace()
         .next()
         .ok_or_else(|| "bad sha file".to_string())
-        .map(|s| s.to_string())?;
+        .map(|s| s.to_ascii_lowercase())?;
 
     if expected.len() < 16 {
         return Err("checksum looked wrong".to_string());
     }
+
+    // Compute SHA-256 of extracted binary and compare against expected checksum.
+    let mut hasher = Sha256::new();
 
     // Extract `ferro` from tar.gz
     let mut ar = Archive::new(GzDecoder::new(&tar_gz[..]));
@@ -587,6 +591,14 @@ fn perform_self_update(latest_tag: &str) -> Result<String, String> {
     }
 
     let ferro_bytes = ferro_bytes.ok_or_else(|| "missing ferro in archive".to_string())?;
+    hasher.update(&ferro_bytes);
+    let actual = hasher.finalize();
+    let actual_hex = actual.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    if actual_hex != expected {
+        return Err(format!(
+            "checksum mismatch: expected {expected}, got {actual_hex}"
+        ));
+    }
 
     let dst = install_path_user().ok_or_else(|| "HOME not set".to_string())?;
     let dir = dst
