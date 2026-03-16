@@ -1,41 +1,102 @@
 ---
 name: ferromon-polish
-description: Polish Ferromon (Rust TUI) with small, user-facing improvements. Keep performance snappy, avoid heavy scans in hot loops, and always preserve installability (cargo install --git … --locked). Open PRs with clean commits + notes + screenshots if possible.
+description: Refine and clean up the Ferromon Rust TUI with small user-facing improvements. Maintain performance, keep the code simple, and ensure the project remains installable via cargo.
 ---
 
 # Ferromon Polish Skill
 
-You are an agent working in the `ChrisJohnson89/Ferromon` repo.
+You are working inside the `ChrisJohnson89/Ferromon` repository.
 
-## Goal
-Ship small, user-facing improvements to the Ferromon TUI while keeping it fast and installable.
+Ferromon is a lightweight Rust terminal system monitor built with:
 
-## Hard rules
-- MUST compile: `cargo fmt && cargo clippy -- -D warnings && cargo build --release`
-- MUST be installable: `cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked --force` (at least ensure `Cargo.lock` stays valid)
-- Do NOT add expensive filesystem scans to the dashboard refresh loop.
-- Prefer toggles + on-demand actions over background work.
-- Keep changes PR-sized (one feature per PR unless tightly related).
-- No force-push to `main`. Use PRs.
+- ratatui
+- crossterm
+- sysinfo
 
-## Workflow
-1) Read current UX pain points from README + recent commits.
-2) Pick ONE improvement from the list below.
-3) Implement with tests/guards as appropriate.
-4) Update README and add a screenshot (or describe how to capture).
-5) Open a PR with:
-   - summary
-   - how to test (exact commands)
-   - perf notes (what runs every tick vs on-demand)
+The purpose of this skill is to **polish the project**, not redesign it.
 
-## Suggested improvements (pick 1)
-- Add mount filter toggle (`f`) to switch filtered df view ↔ all mounts.
-- Improve terminal-too-small screen (show required min size).
-- Improve truncation/alignment for process rows and filesystem table.
-- Add CLI flag `--no-mouse` (some terminals hate mouse capture).
-- Add `--tick-ms` validation + show active tick in footer.
-- Make dashboard Tab behavior more discoverable and consistent.
+Focus on clarity, usability, and code cleanliness while preserving performance.
 
-## Performance checklist
-- Anything run every tick must be O(1) or cheap sysinfo calls.
-- Any directory walk must be behind a keypress (on-demand) and show progress.
+---
+
+# Goal
+
+Deliver small, user-facing improvements that make Ferromon feel cleaner and more reliable without increasing complexity.
+
+Examples of acceptable polish work:
+
+- UI readability improvements
+- alignment and truncation fixes
+- simplifying code paths
+- removing dead code
+- improving error handling
+- improving CLI argument validation
+- small UX refinements
+
+Do not introduce large new features.
+
+---
+
+# Hard Rules
+
+Code must compile cleanly.
+
+Run:
+
+cargo fmt  
+cargo clippy -- -D warnings  
+cargo build --release  
+
+The project must remain installable with:
+
+cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked --force
+
+Do not break Cargo.lock.
+
+Do not add heavy background work.
+
+Do not introduce filesystem scans or expensive operations inside the dashboard refresh loop.
+
+Prefer on-demand actions triggered by keypress instead of continuous background processing.
+
+---
+
+# Performance Expectations
+
+Ferromon is a real-time terminal tool.
+
+Anything executed every tick must be extremely cheap.
+
+Allowed in the refresh loop:
+
+- sysinfo metric reads
+- lightweight state updates
+- rendering
+
+Not allowed in the refresh loop:
+
+- filesystem traversal
+- expensive allocations
+- blocking IO
+
+Expensive work must only run on explicit user action.
+
+---
+
+# Workflow
+
+1. Read the current code and README.
+2. Identify one small polish improvement.
+3. Implement the improvement.
+4. Ensure formatting, linting, and compilation pass.
+5. Update README if the behavior or UX changes.
+
+Open a PR containing:
+
+- short summary of the improvement
+- exact commands to test the change
+- performance notes if the change touches the render loop
+
+Keep commits small and focused.
+
+Never push directly to main.
