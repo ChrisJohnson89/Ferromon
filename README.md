@@ -1,131 +1,92 @@
-```text
-███████╗███████╗██████╗ ██████╗  ██████╗ ███╗   ███╗ ██████╗ ███╗   ██╗
-██╔════╝██╔════╝██╔══██╗██╔══██╗██╔═══██╗████╗ ████║██╔═══██╗████╗  ██║
-█████╗  █████╗  ██████╔╝██████╔╝██║   ██║██╔████╔██║██║   ██║██╔██╗ ██║
-██╔══╝  ██╔══╝  ██╔══██╗██╔══██╗██║   ██║██║╚██╔╝██║██║   ██║██║╚██╗██║
-██║     ███████╗██║  ██║██║  ██║╚██████╔╝██║ ╚═╝ ██║╚██████╔╝██║ ╚████║
-╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
+<div align="center">
+  <img src="assets/logo.png" alt="Ferromon" width="180" />
 
-                     Forge‑Grade Terminal Monitoring
-                      CPU • Memory • System Insight
-```
-A fast, interactive **Rust TUI** for quick host checks.
+# Ferromon
 
-Built with **ratatui + crossterm + sysinfo**.
+A fast, lightweight TUI system monitor built in Rust. Check CPU, memory, disk, processes, services, and logs without leaving your terminal.
 
-## Why
-You want a “what’s going on with this box?” view in ~2 seconds:
-- CPU + memory pressure
-- top processes
-- disk usage (df-style)
-- one-key deeper dives when needed
+![Rust](https://img.shields.io/badge/rust-stable-orange)
+[![Release](https://img.shields.io/github/v/release/ChrisJohnson89/Ferromon)](https://github.com/ChrisJohnson89/Ferromon/releases/latest)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)
 
-## Features
-- Dashboard: CPU + Memory gauges + **top processes**
-- Disk panel: compact **df-style** overview (filtered to “real” mounts)
-- Processes view (`p`): top CPU/mem with scroll
-- Disk dive (`d`): on-demand directory sizing with drill-down into directories and large files
-- Services view (`v`, Linux): `systemd` unit health, failed services, restart counts, recent state changes
-- Logs view (`l`, Linux): `journalctl` tailing with severity and unit filters, with syslog fallback
-- Refresh rate control via CLI flag
+</div>
 
 ## Install
-
-### One-liner install (recommended)
-This installs the latest release for your OS/arch and verifies checksums.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ChrisJohnson89/Ferromon/main/install.sh | bash
 ```
 
-After installing, Ferromon can also self-update from inside the TUI (press `u`).
+Installs to `/usr/local/bin/ferro` (falls back to `~/.local/bin` without sudo). Press `u` inside the TUI to self-update.
 
-### Prebuilt binaries (manual)
-Grab the right archive from **GitHub Releases**, extract, and place `ferro` on your PATH.
+**Supported platforms:**
+| Platform | Target |
+|----------|--------|
+| Linux x86_64 | `x86_64-unknown-linux-musl` (static) |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| macOS Intel | `x86_64-apple-darwin` |
 
-Example (Linux x86_64):
+## Usage
+
 ```bash
-# pick a version from: https://github.com/ChrisJohnson89/Ferromon/releases
-VER=v0.3.12
-TARGET=x86_64-unknown-linux-gnu
-curl -L -o ferromon.tar.gz "https://github.com/ChrisJohnson89/Ferromon/releases/download/${VER}/ferromon-${VER}-${TARGET}.tar.gz"
-
-tar -xzf ferromon.tar.gz
-chmod +x ferro
-sudo mv ferro /usr/local/bin/ferro
-
+ferro
+ferro --tick-ms 750     # custom refresh rate
+ferro --no-mouse        # disable mouse (tmux / SSH)
 ferro --version
+ferro --help
 ```
 
-### Build from source
-Rust required (**rustc 1.80+**). Minimum terminal size: **80x14**.
+## Keybindings
+
+| Key | Action |
+|-----|--------|
+| `q` / `Esc` | Quit / back to dashboard |
+| `?` | Toggle help |
+| `r` | Refresh now |
+| `p` | Processes view |
+| `d` | Disk dive |
+| `v` | Services view (Linux) |
+| `l` | Logs view (Linux) |
+| `u` | Self-update |
+| `x` | Print snapshot to stdout and exit |
+
+### Contextual
+
+| Screen | Key | Action |
+|--------|-----|--------|
+| Dashboard | `Tab` | Cycle dir target (CWD ↔ /var ↔ home ↔ /) |
+| Dashboard | `f` | Toggle mount filter (filtered ↔ all) |
+| Processes | `Tab` | Toggle sort (CPU ↔ Mem) |
+| Disk dive | `Tab` | Cycle target (/var ↔ home ↔ /) |
+| Disk dive | `s` | Scan directory |
+| Disk dive | `Enter` | Drill into directory |
+| Disk dive | `←` / `Backspace` | Go up |
+| Services | `Tab` | Cycle filter (failed ↔ unhealthy ↔ active ↔ all) |
+| Services | `Enter` / `l` | Open logs for selected unit |
+| Logs | `Tab` | Cycle severity (`err+` ↔ `warning+` ↔ `info+` ↔ `debug+`) |
+| Logs | `u` | Toggle selected unit ↔ all units |
+
+## Build from Source
+
+Requires Rust stable (rustc 1.80+). Minimum terminal size: **80×14**.
+
+```bash
+git clone https://github.com/ChrisJohnson89/Ferromon.git
+cd Ferromon
+cargo build --release
+./target/release/ferro
+```
+
+Or install directly:
 
 ```bash
 cargo install --git https://github.com/ChrisJohnson89/Ferromon --locked
 ```
 
-Run:
-```bash
-ferro
-```
+## Related
 
-## CLI
-```bash
-ferro --help
-ferro --version
-ferro --tick-ms 750
-ferro --no-mouse        # disable mouse capture (useful in tmux/SSH)
-```
-
-## Keys
-- `q` quit
-- `?` help
-- `Esc` back to dashboard
-- `p` processes
-- `d` disk dive
-- `v` services (Linux)
-- `l` logs (Linux)
-- `r` refresh now
-
-### Contextual
-- Dashboard: `Tab` cycles dir target (CWD ↔ /var ↔ home ↔ /), `f` toggles mount filter (filtered ↔ all)
-- Dashboard: `x` prints a text snapshot to stdout and exits
-- Dashboard: `u` downloads and installs the latest release to `~/.local/bin/ferro`
-- Processes: `Tab` toggles sort (CPU ↔ Mem)
-- Disk dive: `Tab` cycles target (/var ↔ home ↔ /), `s` scans, `Enter` drills into a directory, `←`/`Backspace` goes up
-- Services: `Tab` cycles filters (failed ↔ unhealthy ↔ active ↔ all), `Enter`/`l` opens logs for the selected unit
-- Logs: `Tab` cycles severity (`err+` ↔ `warning+` ↔ `info+` ↔ `debug+`), `u` toggles selected unit ↔ all units
-
-## SRE Roadmap
-Features that would make Ferromon much stronger as a sysadmin/SRE first-response tool:
-
-### Highest priority
-- Service health: `systemd` units, failed services, restart counts, recent state changes
-- Log tailing: `journalctl`/syslog view with severity and unit filters
-- Network visibility: listening ports, established connections, RX/TX throughput, top sockets by process
-- Host pressure signals: load average, swap, iowait, PSI, inode usage, open file descriptors
-- Process inspection/actions: full command line, parent/child tree, cwd/exe path, signals/kill
-- Better snapshots: JSON/text export with hostname, kernel, timestamp, services, network, and log context
-- Container/runtime visibility: Docker/containerd/Kubernetes pod and container summaries
-- Threshold highlighting: obvious warnings for hot CPU, low memory, failed units, full disks, inode exhaustion
-
-### Second wave
-- Historical mini-trends: small sparklines or a short rolling history for CPU, memory, network, and disk IO
-- Filesystem detail: read-only mounts, mount options, NFS/stale mount visibility
-- Search/filter UX: quick filtering for processes, services, mounts, and logs
-- Remote mode: SSH collection or remote snapshot mode for fast fleet triage
-
-### Suggested build order
-1. Service health
-2. Logs
-3. Network
-4. Load/swap/pressure/inodes
-5. Process inspection/actions
-6. JSON snapshot/export
-7. Container visibility
-
-## Screenshot
-*(add one)*
+- [Ferrolog](https://github.com/ChrisJohnson89/Ferrolog) — fast TUI log viewer
 
 ## License
+
 MIT.
