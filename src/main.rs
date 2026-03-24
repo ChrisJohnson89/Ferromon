@@ -143,7 +143,6 @@ struct AppState {
     dash_mount_rows: Vec<DiskRow>,
     dash_top_cpu: Vec<String>,
     dash_top_mem: Vec<String>,
-    dash_top_cores: Vec<String>,
     dash_mem_pressure: Vec<String>,
     dash_cpu_history: VecDeque<u16>,
     dash_mem_history: VecDeque<u16>,
@@ -188,7 +187,6 @@ impl Default for AppState {
             dash_mount_rows: Vec::new(),
             dash_top_cpu: Vec::new(),
             dash_top_mem: Vec::new(),
-            dash_top_cores: Vec::new(),
             dash_mem_pressure: Vec::new(),
             dash_cpu_history: VecDeque::new(),
             dash_mem_history: VecDeque::new(),
@@ -1881,7 +1879,6 @@ fn render_dashboard(
     if need_fs {
         app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 5);
         app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 5);
-        app.dash_top_cores = format_top_cores(system, 8);
         app.dash_mem_pressure = format_memory_pressure(system, 5);
         app.dash_mount_rows = collect_mount_rows(12, app.dash_show_all_mounts)
             .unwrap_or_else(|| disks_table_filtered(disks, 12, app.dash_show_all_mounts));
@@ -1973,16 +1970,35 @@ fn render_dashboard(
                 Span::raw(row.clone()),
             ]));
         }
-        if !app.dash_top_cores.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                "Top cores",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            )]));
-            for row in &app.dash_top_cores {
-                lines.push(Line::from(row.clone()));
+        {
+            let cpus = system.cpus();
+            if !cpus.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![Span::styled(
+                    "Per-core CPU",
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                let bar_width = 16usize;
+                for (idx, cpu) in cpus.iter().enumerate().take(24) {
+                    let pct = cpu.cpu_usage() as f64;
+                    let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
+                    let empty = bar_width.saturating_sub(filled);
+                    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+                    let color = color_for_pct(pct);
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("c{:<2} ", idx),
+                            Style::default().fg(Color::Gray),
+                        ),
+                        Span::styled(bar, Style::default().fg(color)),
+                        Span::styled(
+                            format!(" {:>3.0}%", pct),
+                            Style::default().fg(color),
+                        ),
+                    ]));
+                }
             }
         }
         lines
@@ -3274,24 +3290,6 @@ fn format_top_processes(system: &System, sort: ProcSort, count: usize) -> Vec<St
             format!("{}  {}  {}", trim_to(&p.name, 18), cpu, mem)
         })
         .collect()
-}
-
-fn format_top_cores(system: &System, count: usize) -> Vec<String> {
-    let mut cores: Vec<(usize, f32)> = system
-        .cpus()
-        .iter()
-        .enumerate()
-        .map(|(idx, cpu)| (idx, cpu.cpu_usage()))
-        .collect();
-    cores.sort_by_key(|(_, usage)| Reverse((*usage * 10.0) as i32));
-
-    let items: Vec<String> = cores
-        .into_iter()
-        .take(count)
-        .map(|(idx, usage)| format!("c{} {:.0}%", idx, usage))
-        .collect();
-
-    items.chunks(4).map(|chunk| chunk.join("  ")).collect()
 }
 
 fn format_memory_pressure(system: &System, top_n: usize) -> Vec<String> {
