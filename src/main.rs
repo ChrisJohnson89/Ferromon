@@ -118,6 +118,8 @@ struct AppState {
 
     proc_sort: ProcSort,
     proc_scroll: u16,
+    proc_search: String,
+    proc_search_active: bool,
 
     disk_target: DiskTarget,
     disk_scroll: u16,
@@ -164,6 +166,8 @@ impl Default for AppState {
             show_help: false,
             proc_sort: ProcSort::default(),
             proc_scroll: 0,
+            proc_search: String::new(),
+            proc_search_active: false,
             disk_target: DiskTarget::default(),
             disk_scroll: 0,
             disk_scan: DiskScan::default(),
@@ -1215,6 +1219,77 @@ fn handle_service_search_key(app: &mut AppState, key: &KeyEvent) -> bool {
     }
 }
 
+fn handle_proc_search_key(app: &mut AppState, key: &KeyEvent) -> bool {
+    if !matches!(app.screen, Screen::Processes) {
+        return false;
+    }
+
+    if app.proc_search_active {
+        match key.code {
+            KeyCode::Enter => {
+                app.proc_search_active = false;
+                true
+            }
+            KeyCode::Esc => {
+                if app.proc_search.is_empty() {
+                    app.proc_search_active = false;
+                } else {
+                    app.proc_search.clear();
+                    app.proc_search_active = false;
+                    app.proc_scroll = 0;
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                if app.proc_search.is_empty() {
+                    app.proc_search_active = false;
+                } else {
+                    app.proc_search.pop();
+                    app.proc_scroll = 0;
+                }
+                true
+            }
+            KeyCode::Char(c) if is_text_input_key(key) => {
+                app.proc_search.push(c);
+                app.proc_scroll = 0;
+                true
+            }
+            _ => false,
+        }
+    } else {
+        match key.code {
+            KeyCode::Char('/') if is_text_input_key(key) => {
+                app.proc_search_active = true;
+                true
+            }
+            KeyCode::Esc if !app.proc_search.is_empty() => {
+                app.proc_search.clear();
+                app.proc_scroll = 0;
+                true
+            }
+            KeyCode::Backspace if !app.proc_search.is_empty() => {
+                app.proc_search.pop();
+                app.proc_scroll = 0;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn filtered_proc_rows(rows: Vec<ProcRow>, search: &str) -> Vec<ProcRow> {
+    if search.is_empty() {
+        return rows;
+    }
+    let needle = search.trim().to_ascii_lowercase();
+    let mut matched: Vec<ProcRow> = rows
+        .into_iter()
+        .filter(|p| p.name.to_ascii_lowercase().contains(&needle))
+        .collect();
+    matched.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    matched
+}
+
 fn filtered_service_rows(
     rows: &[ServiceRow],
     filter: ServiceFilter,
@@ -1373,6 +1448,10 @@ fn run_app(
             if let Event::Key(key) = event::read()? {
                 // Avoid key-repeat spam on some terminals
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                if handle_proc_search_key(app, &key) {
                     continue;
                 }
 
@@ -2167,9 +2246,28 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
         procs.truncate(max_rows);
     }
 
-    let header_title = match app.proc_sort {
-        ProcSort::Cpu => "Top processes (CPU)",
-        ProcSort::Mem => "Top processes (Memory)",
+    // Apply search filter; when active, results are sorted by name for stability
+    let procs = filtered_proc_rows(procs, &app.proc_search);
+
+    let header_title = if app.proc_search_active {
+        format!(
+            "Processes ({})  /{}_",
+            match app.proc_sort { ProcSort::Cpu => "CPU", ProcSort::Mem => "Mem" },
+            trim_to(&app.proc_search, 24)
+        )
+    } else if app.proc_search.is_empty() {
+        match app.proc_sort {
+            ProcSort::Cpu => "Top processes (CPU)".to_string(),
+            ProcSort::Mem => "Top processes (Memory)".to_string(),
+        }
+    } else {
+        format!(
+            "Processes ({})  /{}  ({} match{})",
+            match app.proc_sort { ProcSort::Cpu => "CPU", ProcSort::Mem => "Mem" },
+            trim_to(&app.proc_search, 24),
+            procs.len(),
+            if procs.len() == 1 { "" } else { "es" }
+        )
     };
 
     let block = Block::default()
@@ -2219,14 +2317,38 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
     frame.render_widget(table, area);
 
     // Hint line
-    let hint = Paragraph::new(Line::from(vec![
-        Span::styled("Tab", Style::default().fg(Color::Yellow)),
-        Span::raw(" toggles CPU/Mem · "),
-        Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
-        Span::raw(" scroll · Showing top "),
-        Span::styled(max_rows.to_string(), Style::default().fg(Color::White)),
-    ]))
-    .alignment(Alignment::Left);
+    let hint = if app.proc_search_active {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" confirm · "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" clear · typing: "),
+            Span::styled(
+                format!("/{}", trim_to(&app.proc_search, 28)),
+                Style::default().fg(Color::Green),
+            ),
+        ]))
+    } else if !app.proc_search.is_empty() {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::raw(" sort · "),
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::raw(" search · "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" clear filter"),
+        ]))
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::raw(" toggles CPU/Mem · "),
+            Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
+            Span::raw(" scroll · "),
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::raw(" search · Showing top "),
+            Span::styled(max_rows.to_string(), Style::default().fg(Color::White)),
+        ]))
+    };
+    let hint = hint.alignment(Alignment::Left);
 
     let hint_area = Rect {
         x: inner.x,
