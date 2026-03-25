@@ -23,7 +23,7 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
@@ -120,6 +120,7 @@ struct AppState {
     proc_scroll: u16,
     proc_search: String,
     proc_search_active: bool,
+    proc_kill_confirm: Option<(i32, String)>,
 
     disk_target: DiskTarget,
     disk_scroll: u16,
@@ -167,6 +168,7 @@ impl Default for AppState {
             proc_scroll: 0,
             proc_search: String::new(),
             proc_search_active: false,
+            proc_kill_confirm: None,
             disk_target: DiskTarget::default(),
             disk_scroll: 0,
             disk_scan: DiskScan::default(),
@@ -1449,6 +1451,30 @@ fn run_app(
                     continue;
                 }
 
+                // Kill confirm mode intercepts all keys.
+                if app.proc_kill_confirm.is_some() {
+                    let pid = app.proc_kill_confirm.as_ref().map(|(p, _)| *p).unwrap();
+                    match key.code {
+                        KeyCode::Char('y') => {
+                            if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid as u32)) {
+                                let _ = proc.kill_with(sysinfo::Signal::Term);
+                            }
+                            app.proc_kill_confirm = None;
+                        }
+                        KeyCode::Char('K') => {
+                            if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid as u32)) {
+                                proc.kill();
+                            }
+                            app.proc_kill_confirm = None;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            app.proc_kill_confirm = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 if handle_proc_search_key(app, &key) {
                     continue;
                 }
@@ -1583,6 +1609,26 @@ fn run_app(
                             };
                             app.logs_scroll = 0;
                             refresh_logs(app, true);
+                        }
+                    }
+                    KeyCode::Char('k') => {
+                        if matches!(app.screen, Screen::Processes) && !app.proc_search_active {
+                            // Rebuild filtered list to get the PID at the cursor.
+                            let mut procs: Vec<ProcRow> = system
+                                .processes()
+                                .iter()
+                                .map(|(pid, p)| ProcRow::from_process(*pid, p))
+                                .collect();
+                            match app.proc_sort {
+                                ProcSort::Cpu => procs.sort_by_key(|p| Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))),
+                                ProcSort::Mem => procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))),
+                            }
+                            if procs.len() > 200 { procs.truncate(200); }
+                            let procs = filtered_proc_rows(procs, &app.proc_search);
+                            let idx = (app.proc_scroll as usize).min(procs.len().saturating_sub(1));
+                            if let Some(row) = procs.get(idx) {
+                                app.proc_kill_confirm = Some((row.pid, row.name.clone()));
+                            }
                         }
                     }
                     KeyCode::Char('s') => {
@@ -1726,7 +1772,7 @@ fn render_footer(app: &AppState) -> Paragraph<'static> {
         "Esc: back to dashboard",
     ];
 
-    let tips_processes = ["Tab: sort CPU ↔ Mem", "↑/↓: scroll · q: quit", "Esc: back"];
+    let tips_processes = ["Tab: sort CPU ↔ Mem", "↑/↓: scroll · k: kill", "Esc: back"];
 
     let tips_disk = [
         "s: scan (on-demand)",
@@ -1812,7 +1858,8 @@ fn render_help(app: &AppState) -> Paragraph<'static> {
         Screen::Processes => {
             lines.push(Line::from("Processes:"));
             lines.push(Line::from("  Tab — toggle CPU/Mem list"));
-            lines.push(Line::from("  ↑/↓ — scroll"));
+            lines.push(Line::from("  ↑/↓ — scroll · / — search"));
+            lines.push(Line::from("  k — kill selected (y=SIGTERM, K=SIGKILL)"));
         }
         Screen::DiskDive => {
             lines.push(Line::from("Disk dive:"));
@@ -2302,13 +2349,18 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
     // Calculate available width for process name column
     let name_width = ((inner.width.saturating_sub(8 + 10 + 14 + 4)) as usize).max(20);
 
-    let rows = slice.iter().map(|p| {
-        Row::new(vec![
+    let rows = slice.iter().enumerate().map(|(i, p)| {
+        let row = Row::new(vec![
             Cell::from(p.pid.to_string()),
             Cell::from(trim_to(&p.name, name_width)),
             Cell::from(format!("{:.1}%", p.cpu_x10 as f64 / 10.0)),
             Cell::from(format_bytes(p.mem_bytes)),
-        ])
+        ]);
+        if i == 0 {
+            row.style(Style::default().fg(Color::Black).bg(Color::Cyan))
+        } else {
+            row
+        }
     });
 
     let table = Table::new(
@@ -2356,11 +2408,13 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
     } else {
         Paragraph::new(Line::from(vec![
             Span::styled("Tab", Style::default().fg(Color::Yellow)),
-            Span::raw(" toggles CPU/Mem · "),
+            Span::raw(" CPU/Mem · "),
             Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
             Span::raw(" scroll · "),
             Span::styled("/", Style::default().fg(Color::Yellow)),
-            Span::raw(" search · Showing top "),
+            Span::raw(" search · "),
+            Span::styled("k", Style::default().fg(Color::Red)),
+            Span::raw(" kill · top "),
             Span::styled(max_rows.to_string(), Style::default().fg(Color::White)),
         ]))
     };
@@ -2373,6 +2427,36 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
         height: 1,
     };
     frame.render_widget(hint, hint_area);
+
+    // Kill confirmation overlay
+    if let Some((pid, name)) = &app.proc_kill_confirm {
+        let popup = centered_rect(54, 5, area);
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Kill Process ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+        let inner_popup = block.inner(popup);
+        frame.render_widget(block, popup);
+        let text = vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(trim_to(name, 28), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  PID {}", pid)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::raw(" SIGTERM  "),
+                Span::styled("K", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(" SIGKILL  "),
+                Span::styled("n/Esc", Style::default().fg(Color::Yellow)),
+                Span::raw(" cancel"),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(text), inner_popup);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3441,6 +3525,17 @@ fn scan_dir_quick(dir: &Path, limit: usize) -> Vec<String> {
         }
     }
     out
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
 }
 
 fn trim_to(s: &str, max: usize) -> String {
