@@ -28,7 +28,7 @@ use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = env!("FERRO_VERSION");
 const REPO_OWNER: &str = "ChrisJohnson89";
 const REPO_NAME: &str = "Ferromon";
 const UPDATE_CHECK_TTL_SEC: u64 = 6 * 60 * 60;

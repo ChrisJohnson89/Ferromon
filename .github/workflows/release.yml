@@ -3,7 +3,7 @@ name: release
 on:
   push:
     tags:
-      - 'v*'
+      - '20[0-9][0-9].*'
   workflow_dispatch:
 
 permissions:
@@ -44,6 +44,8 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build (release)
+        env:
+          FERRO_RELEASE_VERSION: ${{ github.ref_name }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
