@@ -147,7 +147,6 @@ struct AppState {
     dash_top_cpu: Vec<String>,
     dash_top_mem: Vec<String>,
     dash_mem_pressure: Vec<String>,
-    dash_mem_bar_data: Vec<(String, u64)>,
     dash_cpu_history: VecDeque<u16>,
     dash_mem_history: VecDeque<u16>,
     dash_last_proc_at: Option<Instant>,
@@ -196,7 +195,6 @@ impl Default for AppState {
             dash_top_cpu: Vec::new(),
             dash_top_mem: Vec::new(),
             dash_mem_pressure: Vec::new(),
-            dash_mem_bar_data: Vec::new(),
             dash_cpu_history: VecDeque::new(),
             dash_mem_history: VecDeque::new(),
             dash_last_proc_at: None,
@@ -1984,22 +1982,9 @@ fn render_dashboard(
     };
 
     if need_fs {
-        app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 5);
-        app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 5);
+        app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 20);
+        app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 20);
         app.dash_mem_pressure = format_memory_pressure(system, 5);
-        {
-            let mut procs: Vec<ProcRow> = system
-                .processes()
-                .iter()
-                .map(|(pid, p)| ProcRow::from_process(*pid, p))
-                .collect();
-            procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64)));
-            app.dash_mem_bar_data = procs
-                .into_iter()
-                .take(5)
-                .map(|p| (p.name.clone(), p.mem_bytes))
-                .collect();
-        }
         app.dash_mount_rows = collect_mount_rows(12, app.dash_show_all_mounts)
             .unwrap_or_else(|| disks_table_filtered(disks, 12, app.dash_show_all_mounts));
         let (label, path) = dash_target_path(app.dash_dir_target);
@@ -2060,6 +2045,8 @@ fn render_dashboard(
     let cpu_paragraph = Paragraph::new(cpu_lines).alignment(Alignment::Left);
     frame.render_widget(cpu_paragraph, cpu_chunks[0]);
 
+    // blank(1) + header(1) = 2 overhead rows
+    let cpu_top_show = (cpu_chunks[1].height as usize).saturating_sub(2);
     let cpu_bottom = if app.dash_top_cpu.is_empty() {
         vec![
             Line::from(""),
@@ -2081,36 +2068,11 @@ fn render_dashboard(
                 Span::raw(": "),
             ]),
         ];
-        for (i, row) in app.dash_top_cpu.iter().enumerate() {
+        for (i, row) in app.dash_top_cpu.iter().take(cpu_top_show).enumerate() {
             lines.push(Line::from(vec![
                 Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Gray)),
                 Span::raw(row.clone()),
             ]));
-        }
-        {
-            let cpus = system.cpus();
-            if !cpus.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![Span::styled(
-                    "Per-core CPU",
-                    Style::default()
-                        .fg(Color::Gray)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-                let bar_width = 16usize;
-                for (idx, cpu) in cpus.iter().enumerate().take(24) {
-                    let pct = cpu.cpu_usage() as f64;
-                    let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
-                    let empty = bar_width.saturating_sub(filled);
-                    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
-                    let color = color_for_pct(pct);
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("c{:<2} ", idx), Style::default().fg(Color::Gray)),
-                        Span::styled(bar, Style::default().fg(color)),
-                        Span::styled(format!(" {:>3.0}%", pct), Style::default().fg(color)),
-                    ]));
-                }
-            }
         }
         lines
     };
@@ -2119,19 +2081,86 @@ fn render_dashboard(
         cpu_chunks[1],
     );
 
-    render_detail_panel(
-        frame,
-        cpu_sections[1],
-        "Signals",
-        vec![
-            format!("Now {:.1}%", vm.cpu_usage),
-            format!("Peak {}%", history_peak(&app.dash_cpu_history)),
-            format!("Recent avg {:.1}%", history_average(&app.dash_cpu_history)),
-            format!("Headroom {:.1}%", (100.0 - vm.cpu_usage as f64).max(0.0)),
-        ],
-        &app.dash_cpu_history,
-        cpu_pct_color,
-    );
+    {
+        let block = Block::default().borders(Borders::ALL).title("Signals");
+        frame.render_widget(block.clone(), cpu_sections[1]);
+        let inner = block.inner(cpu_sections[1]);
+        if inner.width > 0 && inner.height > 0 {
+            let stat_strings = vec![
+                format!("Now {:.1}%", vm.cpu_usage),
+                format!("Peak {}%", history_peak(&app.dash_cpu_history)),
+                format!("Recent avg {:.1}%", history_average(&app.dash_cpu_history)),
+                format!("Headroom {:.1}%", (100.0 - vm.cpu_usage as f64).max(0.0)),
+            ];
+            let cpus = system.cpus();
+            let mut core_lines: Vec<Line> = Vec::new();
+            if !cpus.is_empty() {
+                let bar_width = 16usize;
+                core_lines.push(Line::from(""));
+                core_lines.push(Line::from(Span::styled(
+                    "Per-core",
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                )));
+                for (idx, cpu) in cpus.iter().enumerate().take(24) {
+                    let pct = cpu.cpu_usage() as f64;
+                    let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
+                    let empty = bar_width.saturating_sub(filled);
+                    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+                    let color = color_for_pct(pct);
+                    core_lines.push(Line::from(vec![
+                        Span::styled(format!("c{:<2} ", idx), Style::default().fg(Color::Gray)),
+                        Span::styled(bar, Style::default().fg(color)),
+                        Span::styled(format!(" {:>3.0}%", pct), Style::default().fg(color)),
+                    ]));
+                }
+            }
+            let stats_h = stat_strings.len() as u16;
+            let cores_h = core_lines.len() as u16;
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(stats_h),
+                    Constraint::Length(cores_h),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+            frame.render_widget(
+                Paragraph::new(
+                    stat_strings.into_iter().map(Line::from).collect::<Vec<_>>(),
+                )
+                .style(Style::default().fg(Color::Gray)),
+                chunks[0],
+            );
+            if !core_lines.is_empty() {
+                frame.render_widget(Paragraph::new(core_lines), chunks[1]);
+            }
+            let spark_data: Vec<u64> =
+                app.dash_cpu_history.iter().map(|s| *s as u64).collect();
+            if !spark_data.is_empty() && chunks[2].width > 0 && chunks[2].height > 0 {
+                let spark_color = app
+                    .dash_cpu_history
+                    .back()
+                    .map(|s| color_for_pct(*s as f64))
+                    .unwrap_or(cpu_pct_color);
+                let spark_width = chunks[2].width.min(spark_data.len() as u16);
+                let spark_x =
+                    chunks[2].x + (chunks[2].width.saturating_sub(spark_width)) / 2;
+                let spark_area = Rect {
+                    x: spark_x,
+                    y: chunks[2].y,
+                    width: spark_width,
+                    height: chunks[2].height,
+                };
+                frame.render_widget(
+                    Sparkline::default()
+                        .data(&spark_data)
+                        .max(100)
+                        .style(Style::default().fg(spark_color)),
+                    spark_area,
+                );
+            }
+        }
+    }
 
     // Memory
     let memory_block = Block::default()
@@ -2195,7 +2224,9 @@ fn render_dashboard(
         memory_chunks[0],
     );
 
-    let mem_bars = if app.dash_mem_bar_data.is_empty() {
+    // blank(1) + header(1) = 2 overhead rows
+    let mem_top_show = (memory_chunks[1].height as usize).saturating_sub(2);
+    let mem_list = if app.dash_top_mem.is_empty() {
         vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -2204,37 +2235,28 @@ fn render_dashboard(
             )),
         ]
     } else {
-        let bar_width = 14usize;
         let mut lines = vec![
             Line::from(""),
-            Line::from(Span::styled(
-                "Top MEM",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        ];
-        for (name, mem_bytes) in &app.dash_mem_bar_data {
-            let pct = percent(*mem_bytes, vm.total_memory);
-            let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
-            let empty = bar_width.saturating_sub(filled);
-            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
-            let color = color_for_pct(pct);
-            lines.push(Line::from(vec![
+            Line::from(vec![
                 Span::styled(
-                    format!("{:<14}", trim_to(name, 14)),
-                    Style::default().fg(Color::Gray),
+                    "Top MEM",
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" "),
-                Span::styled(bar, Style::default().fg(color)),
-                Span::raw(" "),
-                Span::styled(format_bytes(*mem_bytes), Style::default().fg(color)),
+                Span::raw(": "),
+            ]),
+        ];
+        for (i, row) in app.dash_top_mem.iter().take(mem_top_show).enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Gray)),
+                Span::raw(row.clone()),
             ]));
         }
         lines
     };
     frame.render_widget(
-        Paragraph::new(mem_bars).alignment(Alignment::Left),
+        Paragraph::new(mem_list).alignment(Alignment::Left),
         memory_chunks[1],
     );
 
