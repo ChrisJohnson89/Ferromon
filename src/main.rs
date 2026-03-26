@@ -155,6 +155,7 @@ struct AppState {
     dash_last_io_at: Option<Instant>,
     dash_diskstats_prev: HashMap<String, (u64, u64)>,
     dash_show_all_mounts: bool,
+    hostname: String,
     footer_tip_idx: u8,
     tick_ms: u64,
     dump_snapshot: bool,
@@ -202,6 +203,7 @@ impl Default for AppState {
             dash_last_io_at: None,
             dash_diskstats_prev: HashMap::new(),
             dash_show_all_mounts: true,
+            hostname: System::host_name().unwrap_or_else(|| "unknown".to_string()),
             footer_tip_idx: 0,
             tick_ms: 500,
             dump_snapshot: false,
@@ -1725,6 +1727,8 @@ struct VmSnapshot {
     cpu_usage: f32,
     cpu_cores: usize,
     load_avg_one: f64,
+    load_avg_five: f64,
+    load_avg_fifteen: f64,
     total_memory: u64,
     used_memory: u64,
     available_memory: u64,
@@ -1737,7 +1741,10 @@ struct VmSnapshot {
 fn snapshot(system: &System) -> VmSnapshot {
     let cpu_usage = system.global_cpu_info().cpu_usage();
     let cpu_cores = system.cpus().len();
-    let load_avg_one = System::load_average().one;
+    let load_avg = System::load_average();
+    let load_avg_one = load_avg.one;
+    let load_avg_five = load_avg.five;
+    let load_avg_fifteen = load_avg.fifteen;
     // sysinfo reports memory in bytes
     let total_memory = system.total_memory();
     let used_memory = system.used_memory();
@@ -1750,6 +1757,8 @@ fn snapshot(system: &System) -> VmSnapshot {
         cpu_usage,
         cpu_cores,
         load_avg_one,
+        load_avg_five,
+        load_avg_fifteen,
         total_memory,
         used_memory,
         available_memory,
@@ -1801,6 +1810,8 @@ fn render_header(app: &AppState) -> Paragraph<'static> {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::ITALIC),
         ),
+        Span::raw("  •  "),
+        Span::styled(app.hostname.clone(), Style::default().fg(Color::Yellow)),
         Span::raw("  •  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(": quit  "),
@@ -1998,9 +2009,6 @@ fn render_dashboard(
         .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
         .split(cpu_inner);
 
-    let cpu_summary_block = Block::default().borders(Borders::ALL).title("Summary");
-    frame.render_widget(cpu_summary_block.clone(), cpu_sections[0]);
-    let cpu_summary_inner = cpu_summary_block.inner(cpu_sections[0]);
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2008,12 +2016,12 @@ fn render_dashboard(
             Constraint::Length(1),
             Constraint::Min(0),
         ])
-        .split(cpu_summary_inner);
+        .split(cpu_sections[0]);
 
     let cpu_pct_color = color_for_pct(vm.cpu_usage as f64);
     let cpu_lines = vec![
         Line::from(vec![
-            Span::styled("CPU ", Style::default().fg(Color::Gray)),
+            Span::styled("CPU  ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.cpu_usage),
                 Style::default().fg(cpu_pct_color),
@@ -2022,18 +2030,20 @@ fn render_dashboard(
         Line::from(vec![
             Span::styled("Load ", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{:.2}", vm.load_avg_one),
+                format!("{:.2}  {:.2}  {:.2}", vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen),
                 Style::default().fg(Color::White),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("Cores", Style::default().fg(Color::Gray)),
             Span::raw("  "),
-            Span::styled("Cores ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", vm.cpu_cores),
                 Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Up ", Style::default().fg(Color::Gray)),
+            Span::styled("Up   ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format_uptime(vm.uptime_secs),
                 Style::default().fg(Color::White),
@@ -2129,22 +2139,19 @@ fn render_dashboard(
         .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
         .split(memory_inner);
 
-    let memory_summary_block = Block::default().borders(Borders::ALL).title("Summary");
-    frame.render_widget(memory_summary_block.clone(), memory_sections[0]);
-    let memory_summary_inner = memory_summary_block.inner(memory_sections[0]);
     let memory_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Min(0),
         ])
-        .split(memory_summary_inner);
+        .split(memory_sections[0]);
 
     let mem_pct_color = color_for_pct(vm.memory_percent);
     let memory_lines = vec![
         Line::from(vec![
-            Span::styled("Mem ", Style::default().fg(Color::Gray)),
+            Span::styled("Mem  ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!(
                     "{} / {}",
@@ -2153,18 +2160,18 @@ fn render_dashboard(
                 ),
                 Style::default().fg(mem_pct_color),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Avail ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format_bytes(vm.available_memory),
-                Style::default().fg(Color::White),
-            ),
             Span::raw("  "),
-            Span::styled("Use ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.memory_percent),
                 Style::default().fg(mem_pct_color),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Avail", Style::default().fg(Color::Gray)),
+            Span::raw("  "),
+            Span::styled(
+                format_bytes(vm.available_memory),
+                Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
@@ -2172,7 +2179,7 @@ fn render_dashboard(
             Span::styled(
                 if vm.total_swap > 0 {
                     format!(
-                        "{}/{}",
+                        "{} / {}",
                         format_bytes(vm.used_swap),
                         format_bytes(vm.total_swap)
                     )
