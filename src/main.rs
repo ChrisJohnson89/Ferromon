@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -23,7 +23,9 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, Wrap,
+};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
@@ -150,6 +152,8 @@ struct AppState {
     dash_last_proc_at: Option<Instant>,
     dash_last_fs_at: Option<Instant>,
     dash_last_history_at: Option<Instant>,
+    dash_last_io_at: Option<Instant>,
+    dash_diskstats_prev: HashMap<String, (u64, u64)>,
     dash_show_all_mounts: bool,
     footer_tip_idx: u8,
     tick_ms: u64,
@@ -195,6 +199,8 @@ impl Default for AppState {
             dash_last_proc_at: None,
             dash_last_fs_at: None,
             dash_last_history_at: None,
+            dash_last_io_at: None,
+            dash_diskstats_prev: HashMap::new(),
             dash_show_all_mounts: true,
             footer_tip_idx: 0,
             tick_ms: 500,
@@ -1286,7 +1292,11 @@ fn filtered_proc_rows(rows: Vec<ProcRow>, search: &str) -> Vec<ProcRow> {
         .into_iter()
         .filter(|p| p.name.to_ascii_lowercase().contains(&needle))
         .collect();
-    matched.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    matched.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
     matched
 }
 
@@ -1359,6 +1369,19 @@ fn run_app(
             if matches!(app.screen, Screen::Dashboard) && refresh_processes {
                 // reuse this timestamp for both proc+fs scan cadence
                 app.dash_last_proc_at = Some(Instant::now());
+            }
+            // Update disk I/O rates every tick — cheap, just reads sysinfo cached values.
+            let io_elapsed = app
+                .dash_last_io_at
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or_else(|| tick_rate.as_secs_f64());
+            app.dash_last_io_at = Some(Instant::now());
+            if !app.dash_mount_rows.is_empty() {
+                update_disk_io_rates(
+                    &mut app.dash_mount_rows,
+                    &mut app.dash_diskstats_prev,
+                    io_elapsed,
+                );
             }
             if matches!(app.screen, Screen::Services) {
                 refresh_services(app, false);
@@ -1620,10 +1643,16 @@ fn run_app(
                                 .map(|(pid, p)| ProcRow::from_process(*pid, p))
                                 .collect();
                             match app.proc_sort {
-                                ProcSort::Cpu => procs.sort_by_key(|p| Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))),
-                                ProcSort::Mem => procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))),
+                                ProcSort::Cpu => procs.sort_by_key(|p| {
+                                    Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))
+                                }),
+                                ProcSort::Mem => procs.sort_by_key(|p| {
+                                    Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))
+                                }),
                             }
-                            if procs.len() > 200 { procs.truncate(200); }
+                            if procs.len() > 200 {
+                                procs.truncate(200);
+                            }
                             let procs = filtered_proc_rows(procs, &app.proc_search);
                             let idx = (app.proc_scroll as usize).min(procs.len().saturating_sub(1));
                             if let Some(row) = procs.get(idx) {
@@ -1687,6 +1716,8 @@ struct DiskRow {
     avail: u64,
     use_pct: f64,
     mount: String,
+    read_bps: u64,
+    write_bps: u64,
 }
 
 #[derive(Clone)]
@@ -2035,15 +2066,9 @@ fn render_dashboard(
                     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
                     let color = color_for_pct(pct);
                     lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("c{:<2} ", idx),
-                            Style::default().fg(Color::Gray),
-                        ),
+                        Span::styled(format!("c{:<2} ", idx), Style::default().fg(Color::Gray)),
                         Span::styled(bar, Style::default().fg(color)),
-                        Span::styled(
-                            format!(" {:>3.0}%", pct),
-                            Style::default().fg(color),
-                        ),
+                        Span::styled(format!(" {:>3.0}%", pct), Style::default().fg(color)),
                     ]));
                 }
             }
@@ -2230,27 +2255,37 @@ fn render_dashboard(
     };
     let df_rows = app.dash_mount_rows.iter().map(|r| {
         Row::new(vec![
-            Cell::from(trim_to(&r.mount, 14)),
+            Cell::from(trim_to(&r.mount, 12)),
             Cell::from(Span::styled(
                 format!("{:.0}%", r.use_pct),
                 Style::default().fg(color_for_pct(r.use_pct)),
             )),
             Cell::from(format!("{}/{}", format_bytes(r.used), format_bytes(r.size))),
-            Cell::from(trim_to(&r.fs, 14)),
+            Cell::from(Span::styled(
+                format_rate(r.read_bps),
+                Style::default().fg(Color::Cyan),
+            )),
+            Cell::from(Span::styled(
+                format_rate(r.write_bps),
+                Style::default().fg(Color::Magenta),
+            )),
+            Cell::from(trim_to(&r.fs, 10)),
         ])
     });
 
     let df = Table::new(
         df_rows,
         [
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(18),
-            Constraint::Min(12),
+            Constraint::Length(12),
+            Constraint::Length(5),
+            Constraint::Length(16),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Min(8),
         ],
     )
     .header(
-        Row::new(vec!["MOUNT", "USE", "USED/TOTAL", "FS"]).style(
+        Row::new(vec!["MOUNT", "USE", "USED/TOTAL", "R/s", "W/s", "FS"]).style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -2315,7 +2350,10 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
     let header_title = if app.proc_search_active {
         format!(
             "Processes ({})  /{}_",
-            match app.proc_sort { ProcSort::Cpu => "CPU", ProcSort::Mem => "Mem" },
+            match app.proc_sort {
+                ProcSort::Cpu => "CPU",
+                ProcSort::Mem => "Mem",
+            },
             trim_to(&app.proc_search, 24)
         )
     } else if app.proc_search.is_empty() {
@@ -2326,7 +2364,10 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
     } else {
         format!(
             "Processes ({})  /{}  ({} match{})",
-            match app.proc_sort { ProcSort::Cpu => "CPU", ProcSort::Mem => "Mem" },
+            match app.proc_sort {
+                ProcSort::Cpu => "CPU",
+                ProcSort::Mem => "Mem",
+            },
             trim_to(&app.proc_search, 24),
             procs.len(),
             if procs.len() == 1 { "" } else { "es" }
@@ -2441,15 +2482,28 @@ fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, 
         let text = vec![
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(trim_to(name, 28), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    trim_to(name, 28),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!("  PID {}", pid)),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "y",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" SIGTERM  "),
-                Span::styled("K", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "K",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" SIGKILL  "),
                 Span::styled("n/Esc", Style::default().fg(Color::Yellow)),
                 Span::raw(" cancel"),
@@ -3276,6 +3330,8 @@ fn parse_df_row(line: &str) -> Option<DiskRow> {
         size,
         used,
         avail,
+        read_bps: 0,
+        write_bps: 0,
         use_pct,
         mount: parts[numeric_idx + 4..].join(" "),
     })
@@ -3337,6 +3393,8 @@ fn disks_table_filtered(disks: &Disks, limit: usize, show_all: bool) -> Vec<Disk
             avail,
             use_pct: pct,
             mount,
+            read_bps: 0,
+            write_bps: 0,
         };
 
         if !show_all && should_hide_mount_row(&row) {
@@ -3546,6 +3604,70 @@ fn trim_to(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max - 1])
     }
+}
+
+fn format_rate(bps: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bps as f64;
+    if b >= GIB {
+        format!("{:.1}G/s", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1}M/s", b / MIB)
+    } else if b >= KIB {
+        format!("{:.0}K/s", b / KIB)
+    } else if bps == 0 {
+        "—".to_string()
+    } else {
+        format!("{bps}B/s")
+    }
+}
+
+fn update_disk_io_rates(
+    rows: &mut Vec<DiskRow>,
+    prev_stats: &mut HashMap<String, (u64, u64)>,
+    elapsed_secs: f64,
+) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (rows, prev_stats, elapsed_secs);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if elapsed_secs <= 0.0 {
+            return;
+        }
+        let current = read_diskstats_map();
+        for row in rows.iter_mut() {
+            let dev = Path::new(&row.fs)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let (Some(&(pr, pw)), Some(&(cr, cw))) = (prev_stats.get(&dev), current.get(&dev)) {
+                row.read_bps = ((cr.saturating_sub(pr) * 512) as f64 / elapsed_secs) as u64;
+                row.write_bps = ((cw.saturating_sub(pw) * 512) as f64 / elapsed_secs) as u64;
+            }
+        }
+        *prev_stats = current;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_diskstats_map() -> HashMap<String, (u64, u64)> {
+    let mut map = HashMap::new();
+    if let Ok(content) = fs::read_to_string("/proc/diskstats") {
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 10 {
+                let dev = parts[2].to_string();
+                let read_sectors = parts[5].parse::<u64>().unwrap_or(0);
+                let write_sectors = parts[9].parse::<u64>().unwrap_or(0);
+                map.insert(dev, (read_sectors, write_sectors));
+            }
+        }
+    }
+    map
 }
 
 fn format_bytes(bytes: u64) -> String {
