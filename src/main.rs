@@ -2027,35 +2027,30 @@ fn render_dashboard(
 
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(cpu_sections[0]);
 
     let cpu_pct_color = color_for_pct(vm.cpu_usage as f64);
     let cpu_lines = vec![
         Line::from(vec![
-            Span::styled("CPU  ", Style::default().fg(Color::Gray)),
+            Span::styled("CPU ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}%", vm.cpu_usage),
                 Style::default().fg(cpu_pct_color),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Load ", Style::default().fg(Color::Gray)),
+            Span::styled("  Load ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.2}  {:.2}  {:.2}", vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen),
                 Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Cores", Style::default().fg(Color::Gray)),
-            Span::raw("  "),
+            Span::styled("Cores ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", vm.cpu_cores),
                 Style::default().fg(Color::White),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Up   ", Style::default().fg(Color::Gray)),
+            Span::styled("  Up ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format_uptime(vm.uptime_secs),
                 Style::default().fg(Color::White),
@@ -2066,20 +2061,26 @@ fn render_dashboard(
     frame.render_widget(cpu_paragraph, cpu_chunks[0]);
 
     let cpu_bottom = if app.dash_top_cpu.is_empty() {
-        vec![Line::from(Span::styled(
-            "Top CPU: (no data)",
-            Style::default().fg(Color::Gray),
-        ))]
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Top CPU: (no data)",
+                Style::default().fg(Color::Gray),
+            )),
+        ]
     } else {
-        let mut lines = vec![Line::from(vec![
-            Span::styled(
-                "Top CPU",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": "),
-        ])];
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "Top CPU",
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(": "),
+            ]),
+        ];
         for (i, row) in app.dash_top_cpu.iter().enumerate() {
             lines.push(Line::from(vec![
                 Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Gray)),
@@ -2195,18 +2196,24 @@ fn render_dashboard(
     );
 
     let mem_bars = if app.dash_mem_bar_data.is_empty() {
-        vec![Line::from(Span::styled(
-            "Top MEM: (no data)",
-            Style::default().fg(Color::Gray),
-        ))]
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Top MEM: (no data)",
+                Style::default().fg(Color::Gray),
+            )),
+        ]
     } else {
         let bar_width = 14usize;
-        let mut lines = vec![Line::from(Span::styled(
-            "Top MEM",
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ))];
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Top MEM",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ];
         for (name, mem_bytes) in &app.dash_mem_bar_data {
             let pct = percent(*mem_bytes, vm.total_memory);
             let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
