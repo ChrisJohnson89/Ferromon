@@ -24,7 +24,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, Wrap,
+    Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap,
 };
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
@@ -147,6 +147,7 @@ struct AppState {
     dash_top_cpu: Vec<String>,
     dash_top_mem: Vec<String>,
     dash_mem_pressure: Vec<String>,
+    dash_mem_bar_data: Vec<(String, u64)>,
     dash_cpu_history: VecDeque<u16>,
     dash_mem_history: VecDeque<u16>,
     dash_last_proc_at: Option<Instant>,
@@ -195,6 +196,7 @@ impl Default for AppState {
             dash_top_cpu: Vec::new(),
             dash_top_mem: Vec::new(),
             dash_mem_pressure: Vec::new(),
+            dash_mem_bar_data: Vec::new(),
             dash_cpu_history: VecDeque::new(),
             dash_mem_history: VecDeque::new(),
             dash_last_proc_at: None,
@@ -1748,7 +1750,8 @@ fn snapshot(system: &System) -> VmSnapshot {
     // sysinfo reports memory in bytes
     let total_memory = system.total_memory();
     let used_memory = system.used_memory();
-    let available_memory = system.available_memory();
+    // On macOS available_memory() can return 0; free_memory() is the reliable fallback.
+    let available_memory = system.available_memory().max(system.free_memory());
     let memory_percent = percent(used_memory, total_memory);
     let total_swap = system.total_swap();
     let used_swap = system.used_swap();
@@ -1984,6 +1987,19 @@ fn render_dashboard(
         app.dash_top_cpu = format_top_processes(system, ProcSort::Cpu, 5);
         app.dash_top_mem = format_top_processes(system, ProcSort::Mem, 5);
         app.dash_mem_pressure = format_memory_pressure(system, 5);
+        {
+            let mut procs: Vec<ProcRow> = system
+                .processes()
+                .iter()
+                .map(|(pid, p)| ProcRow::from_process(*pid, p))
+                .collect();
+            procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64)));
+            app.dash_mem_bar_data = procs
+                .into_iter()
+                .take(5)
+                .map(|p| (p.name.clone(), p.mem_bytes))
+                .collect();
+        }
         app.dash_mount_rows = collect_mount_rows(12, app.dash_show_all_mounts)
             .unwrap_or_else(|| disks_table_filtered(disks, 12, app.dash_show_all_mounts));
         let (label, path) = dash_target_path(app.dash_dir_target);
@@ -2011,11 +2027,7 @@ fn render_dashboard(
 
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(cpu_sections[0]);
 
     let cpu_pct_color = color_for_pct(vm.cpu_usage as f64);
@@ -2052,12 +2064,6 @@ fn render_dashboard(
     ];
     let cpu_paragraph = Paragraph::new(cpu_lines).alignment(Alignment::Left);
     frame.render_widget(cpu_paragraph, cpu_chunks[0]);
-
-    let cpu_gauge = Gauge::default()
-        .gauge_style(Style::default().fg(cpu_pct_color))
-        .label("")
-        .ratio(((vm.cpu_usage as f64) / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(cpu_gauge, cpu_chunks[1]);
 
     let cpu_bottom = if app.dash_top_cpu.is_empty() {
         vec![Line::from(Span::styled(
@@ -2109,7 +2115,7 @@ fn render_dashboard(
     };
     frame.render_widget(
         Paragraph::new(cpu_bottom).alignment(Alignment::Left),
-        cpu_chunks[2],
+        cpu_chunks[1],
     );
 
     render_detail_panel(
@@ -2141,14 +2147,19 @@ fn render_dashboard(
 
     let memory_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(memory_sections[0]);
 
     let mem_pct_color = color_for_pct(vm.memory_percent);
+    let swap_str = if vm.total_swap > 0 {
+        format!(
+            "{} / {}",
+            format_bytes(vm.used_swap),
+            format_bytes(vm.total_swap)
+        )
+    } else {
+        "off".to_string()
+    };
     let memory_lines = vec![
         Line::from(vec![
             Span::styled("Mem  ", Style::default().fg(Color::Gray)),
@@ -2173,70 +2184,51 @@ fn render_dashboard(
                 format_bytes(vm.available_memory),
                 Style::default().fg(Color::White),
             ),
-        ]),
-        Line::from(vec![
+            Span::raw("   "),
             Span::styled("Swap ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                if vm.total_swap > 0 {
-                    format!(
-                        "{} / {}",
-                        format_bytes(vm.used_swap),
-                        format_bytes(vm.total_swap)
-                    )
-                } else {
-                    "off".to_string()
-                },
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(swap_str, Style::default().fg(Color::White)),
         ]),
     ];
-    let memory_paragraph = Paragraph::new(memory_lines).alignment(Alignment::Left);
-    frame.render_widget(memory_paragraph, memory_chunks[0]);
+    frame.render_widget(
+        Paragraph::new(memory_lines).alignment(Alignment::Left),
+        memory_chunks[0],
+    );
 
-    let memory_gauge = Gauge::default()
-        .gauge_style(Style::default().fg(mem_pct_color))
-        .label("")
-        .ratio((vm.memory_percent / 100.0).clamp(0.0, 1.0));
-    frame.render_widget(memory_gauge, memory_chunks[1]);
-
-    let mem_bottom = if app.dash_top_mem.is_empty() {
+    let mem_bars = if app.dash_mem_bar_data.is_empty() {
         vec![Line::from(Span::styled(
             "Top MEM: (no data)",
             Style::default().fg(Color::Gray),
         ))]
     } else {
-        let mut lines = vec![Line::from(vec![
-            Span::styled(
-                "Top MEM",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(": "),
-        ])];
-        for (i, row) in app.dash_top_mem.iter().enumerate() {
+        let bar_width = 14usize;
+        let mut lines = vec![Line::from(Span::styled(
+            "Top MEM",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        for (name, mem_bytes) in &app.dash_mem_bar_data {
+            let pct = percent(*mem_bytes, vm.total_memory);
+            let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
+            let empty = bar_width.saturating_sub(filled);
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+            let color = color_for_pct(pct);
             lines.push(Line::from(vec![
-                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Gray)),
-                Span::raw(row.clone()),
+                Span::styled(
+                    format!("{:<14}", trim_to(name, 14)),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::raw(" "),
+                Span::styled(bar, Style::default().fg(color)),
+                Span::raw(" "),
+                Span::styled(format_bytes(*mem_bytes), Style::default().fg(color)),
             ]));
-        }
-        if !app.dash_mem_pressure.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                "Pressure",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            )]));
-            for row in &app.dash_mem_pressure {
-                lines.push(Line::from(row.clone()));
-            }
         }
         lines
     };
     frame.render_widget(
-        Paragraph::new(mem_bottom).alignment(Alignment::Left),
-        memory_chunks[2],
+        Paragraph::new(mem_bars).alignment(Alignment::Left),
+        memory_chunks[1],
     );
 
     let mut memory_signals = vec![
