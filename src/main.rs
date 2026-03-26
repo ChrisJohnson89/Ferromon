@@ -1996,7 +1996,7 @@ fn render_dashboard(
             procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64)));
             app.dash_mem_bar_data = procs
                 .into_iter()
-                .take(5)
+                .take(10)
                 .map(|p| (p.name.clone(), p.mem_bytes))
                 .collect();
         }
@@ -2027,7 +2027,7 @@ fn render_dashboard(
 
     let cpu_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(cpu_sections[0]);
 
     let cpu_pct_color = color_for_pct(vm.cpu_usage as f64);
@@ -2038,8 +2038,7 @@ fn render_dashboard(
                 format!("{:.1}%", vm.cpu_usage),
                 Style::default().fg(cpu_pct_color),
             ),
-        ]),
-        Line::from(vec![
+            Span::raw("   "),
             Span::styled("Load ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.2}  {:.2}  {:.2}", vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen),
@@ -2053,9 +2052,8 @@ fn render_dashboard(
                 format!("{}", vm.cpu_cores),
                 Style::default().fg(Color::White),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Up   ", Style::default().fg(Color::Gray)),
+            Span::raw("   "),
+            Span::styled("Up ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format_uptime(vm.uptime_secs),
                 Style::default().fg(Color::White),
@@ -2140,15 +2138,10 @@ fn render_dashboard(
     frame.render_widget(memory_block.clone(), panels[1]);
 
     let memory_inner = memory_block.inner(panels[1]);
-    let memory_sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(memory_inner);
-
     let memory_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(0)])
-        .split(memory_sections[0]);
+        .split(memory_inner);
 
     let mem_pct_color = color_for_pct(vm.memory_percent);
     let swap_str = if vm.total_swap > 0 {
@@ -2231,30 +2224,6 @@ fn render_dashboard(
         memory_chunks[1],
     );
 
-    let mut memory_signals = vec![
-        format!("Now {:.1}%", vm.memory_percent),
-        format!("Peak {}%", history_peak(&app.dash_mem_history)),
-        format!("Recent avg {:.1}%", history_average(&app.dash_mem_history)),
-        format!("Headroom {}", format_bytes(vm.available_memory)),
-    ];
-    memory_signals.push(if vm.total_swap > 0 {
-        format!(
-            "Swap {:.0}% ({}/{})",
-            percent(vm.used_swap, vm.total_swap),
-            format_bytes(vm.used_swap),
-            format_bytes(vm.total_swap)
-        )
-    } else {
-        "Swap off".to_string()
-    });
-    render_detail_panel(
-        frame,
-        memory_sections[1],
-        "Signals",
-        memory_signals,
-        &app.dash_mem_history,
-        mem_pct_color,
-    );
 
     // Disk
     let disk_block = Block::default()
