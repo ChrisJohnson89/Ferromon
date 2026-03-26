@@ -1731,6 +1731,7 @@ struct VmSnapshot {
     memory_percent: f64,
     total_swap: u64,
     used_swap: u64,
+    uptime_secs: u64,
 }
 
 fn snapshot(system: &System) -> VmSnapshot {
@@ -1755,6 +1756,20 @@ fn snapshot(system: &System) -> VmSnapshot {
         memory_percent,
         total_swap,
         used_swap,
+        uptime_secs: System::uptime(),
+    }
+}
+
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{}d {}h {}m", days, hours, mins)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
     }
 }
 
@@ -2014,6 +2029,13 @@ fn render_dashboard(
             Span::styled("Cores ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", vm.cpu_cores),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Up ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format_uptime(vm.uptime_secs),
                 Style::default().fg(Color::White),
             ),
         ]),
