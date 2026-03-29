@@ -23,12 +23,13 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
+
+mod cli;
+mod config;
 
 const VERSION: &str = env!("FERRO_VERSION");
 const REPO_OWNER: &str = "ChrisJohnson89";
@@ -43,6 +44,18 @@ enum Screen {
     DiskDive,
     Services,
     Logs,
+}
+
+impl From<config::DefaultScreen> for Screen {
+    fn from(value: config::DefaultScreen) -> Self {
+        match value {
+            config::DefaultScreen::Dashboard => Screen::Dashboard,
+            config::DefaultScreen::Processes => Screen::Processes,
+            config::DefaultScreen::DiskDive => Screen::DiskDive,
+            config::DefaultScreen::Services => Screen::Services,
+            config::DefaultScreen::Logs => Screen::Logs,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -226,107 +239,6 @@ struct ServiceState {
 #[derive(Clone, Default)]
 struct LogState {
     inner: Arc<Mutex<LogStateInner>>,
-}
-
-#[derive(Default)]
-struct Args {
-    tick_ms: u64,
-    no_mouse: bool,
-    show_help: bool,
-    show_version: bool,
-}
-
-fn parse_args() -> Args {
-    let mut tick_ms: u64 = 500;
-    let mut no_mouse = false;
-    let mut show_help = false;
-    let mut show_version = false;
-
-    let argv: Vec<String> = std::env::args().collect();
-    let mut i = 1;
-    while i < argv.len() {
-        let a = argv[i].as_str();
-        match a {
-            "-h" | "--help" => {
-                show_help = true;
-            }
-            "-V" | "--version" => {
-                show_version = true;
-            }
-            "--no-mouse" => {
-                no_mouse = true;
-            }
-            "--tick-ms" => {
-                if i + 1 >= argv.len() {
-                    show_help = true;
-                } else if let Ok(v) = argv[i + 1].parse::<u64>() {
-                    let clamped = v.clamp(50, 5000);
-                    if v != clamped {
-                        eprintln!(
-                            "Warning: --tick-ms {} is out of range, clamped to {}",
-                            v, clamped
-                        );
-                    }
-                    tick_ms = clamped;
-                    i += 1;
-                } else {
-                    show_help = true;
-                }
-            }
-            _ if a.starts_with("--tick-ms=") => {
-                if let Some(v) = a.split('=').nth(1) {
-                    if let Ok(v) = v.parse::<u64>() {
-                        let clamped = v.clamp(50, 5000);
-                        if v != clamped {
-                            eprintln!(
-                                "Warning: --tick-ms {} is out of range, clamped to {}",
-                                v, clamped
-                            );
-                        }
-                        tick_ms = clamped;
-                    } else {
-                        show_help = true;
-                    }
-                }
-            }
-            _ => {
-                // unknown flag
-                show_help = true;
-            }
-        }
-        i += 1;
-    }
-
-    Args {
-        tick_ms,
-        no_mouse,
-        show_help,
-        show_version,
-    }
-}
-
-fn print_cli_help() {
-    println!("ferro {VERSION}");
-    println!(
-        "
-USAGE:
-  ferro [--tick-ms <ms>]
-"
-    );
-    println!("OPTIONS:");
-    println!("  --tick-ms <ms>   UI refresh tick (50..5000). Default: 500");
-    println!("  --no-mouse       Disable mouse capture (useful in tmux/SSH)");
-    println!("  -h, --help       Show help");
-    println!("  -V, --version    Show version");
-    println!(
-        "
-KEYS (in-app):
-  q quit · ? help · Esc back · p processes · d disk dive · v services · l logs · r refresh · f mounts · u update/filter · x snapshot
-
-UPDATE:
-  Ferromon checks GitHub releases occasionally and can self-update.
-  Set FERRO_NO_UPDATE_CHECK=1 to disable checks."
-    );
 }
 
 #[derive(Clone, Default)]
@@ -708,20 +620,22 @@ fn is_file_like_package(path: &Path) -> bool {
 }
 
 fn main() -> io::Result<()> {
-    let args = parse_args();
+    let file_config = config::load_file_config();
+    let args = cli::parse_args();
     if args.show_version {
         println!("{VERSION}");
         return Ok(());
     }
     if args.show_help {
-        print_cli_help();
+        cli::print_cli_help(VERSION);
         return Ok(());
     }
+    let runtime_config = config::resolve_config(&file_config, &args);
 
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    if args.no_mouse {
+    if runtime_config.no_mouse {
         execute!(stdout, EnterAlternateScreen)?;
     } else {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -742,11 +656,12 @@ fn main() -> io::Result<()> {
 
     refresh(&mut system, &mut disks, true);
 
-    let tick_rate = Duration::from_millis(args.tick_ms);
+    let tick_rate = Duration::from_millis(runtime_config.tick_ms);
     let mut last_tick = Instant::now();
 
     let mut app = AppState {
-        tick_ms: args.tick_ms,
+        screen: runtime_config.default_screen.into(),
+        tick_ms: runtime_config.tick_ms,
         ..Default::default()
     };
 
@@ -763,7 +678,7 @@ fn main() -> io::Result<()> {
 
     // Always restore terminal
     disable_raw_mode()?;
-    if args.no_mouse {
+    if runtime_config.no_mouse {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     } else {
         execute!(
@@ -2025,7 +1940,10 @@ fn render_dashboard(
             ),
             Span::styled("  Load ", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{:.2}  {:.2}  {:.2}", vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen),
+                format!(
+                    "{:.2}  {:.2}  {:.2}",
+                    vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen
+                ),
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -2099,7 +2017,9 @@ fn render_dashboard(
                 core_lines.push(Line::from(""));
                 core_lines.push(Line::from(Span::styled(
                     "Per-core",
-                    Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 for (idx, cpu) in cpus.iter().enumerate().take(24) {
                     let pct = cpu.cpu_usage() as f64;
@@ -2125,17 +2045,14 @@ fn render_dashboard(
                 ])
                 .split(inner);
             frame.render_widget(
-                Paragraph::new(
-                    stat_strings.into_iter().map(Line::from).collect::<Vec<_>>(),
-                )
-                .style(Style::default().fg(Color::Gray)),
+                Paragraph::new(stat_strings.into_iter().map(Line::from).collect::<Vec<_>>())
+                    .style(Style::default().fg(Color::Gray)),
                 chunks[0],
             );
             if !core_lines.is_empty() {
                 frame.render_widget(Paragraph::new(core_lines), chunks[1]);
             }
-            let spark_data: Vec<u64> =
-                app.dash_cpu_history.iter().map(|s| *s as u64).collect();
+            let spark_data: Vec<u64> = app.dash_cpu_history.iter().map(|s| *s as u64).collect();
             if !spark_data.is_empty() && chunks[2].width > 0 && chunks[2].height > 0 {
                 let spark_color = app
                     .dash_cpu_history
@@ -2143,8 +2060,7 @@ fn render_dashboard(
                     .map(|s| color_for_pct(*s as f64))
                     .unwrap_or(cpu_pct_color);
                 let spark_width = chunks[2].width.min(spark_data.len() as u16);
-                let spark_x =
-                    chunks[2].x + (chunks[2].width.saturating_sub(spark_width)) / 2;
+                let spark_x = chunks[2].x + (chunks[2].width.saturating_sub(spark_width)) / 2;
                 let spark_area = Rect {
                     x: spark_x,
                     y: chunks[2].y,

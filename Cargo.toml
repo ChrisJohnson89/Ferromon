@@ -23,3 +23,4 @@ tar = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
+toml = "1.1.0"
