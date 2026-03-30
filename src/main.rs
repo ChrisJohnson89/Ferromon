@@ -1,24 +1,18 @@
-use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
+mod app;
+mod cli;
+mod disk;
+mod services;
+mod system;
+mod types;
+mod ui;
+mod update;
+mod utils;
+
 use std::io;
-use std::io::Read;
-use std::process::Command;
-
-use flate2::read::GzDecoder;
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tar::Archive;
 
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
-};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -699,11 +693,11 @@ fn is_file_like_package(path: &Path) -> bool {
         return false;
     };
 
-    matches!(
-        ext,
-        "app" | "bundle" | "framework" | "plugin" | "kext" | "pkg" | "xpc" | "appex"
-    )
-}
+use app::run_app;
+use cli::{parse_args, print_cli_help};
+use system::refresh;
+use types::AppState;
+use update::{check_update, load_update_cache, VERSION};
 
 fn main() -> io::Result<()> {
     let args = parse_args();
