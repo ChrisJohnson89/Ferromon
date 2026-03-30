@@ -23,9 +23,7 @@ use crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap};
 use ratatui::{backend::CrosstermBackend, prelude::Alignment, Terminal};
 use sysinfo::{Disks, Process, ProcessRefreshKind, RefreshKind, System};
 use walkdir::WalkDir;
@@ -2025,7 +2023,10 @@ fn render_dashboard(
             ),
             Span::styled("  Load ", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{:.2}  {:.2}  {:.2}", vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen),
+                format!(
+                    "{:.2}  {:.2}  {:.2}",
+                    vm.load_avg_one, vm.load_avg_five, vm.load_avg_fifteen
+                ),
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -2099,7 +2100,9 @@ fn render_dashboard(
                 core_lines.push(Line::from(""));
                 core_lines.push(Line::from(Span::styled(
                     "Per-core",
-                    Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 for (idx, cpu) in cpus.iter().enumerate().take(24) {
                     let pct = cpu.cpu_usage() as f64;
@@ -2125,17 +2128,14 @@ fn render_dashboard(
                 ])
                 .split(inner);
             frame.render_widget(
-                Paragraph::new(
-                    stat_strings.into_iter().map(Line::from).collect::<Vec<_>>(),
-                )
-                .style(Style::default().fg(Color::Gray)),
+                Paragraph::new(stat_strings.into_iter().map(Line::from).collect::<Vec<_>>())
+                    .style(Style::default().fg(Color::Gray)),
                 chunks[0],
             );
             if !core_lines.is_empty() {
                 frame.render_widget(Paragraph::new(core_lines), chunks[1]);
             }
-            let spark_data: Vec<u64> =
-                app.dash_cpu_history.iter().map(|s| *s as u64).collect();
+            let spark_data: Vec<u64> = app.dash_cpu_history.iter().map(|s| *s as u64).collect();
             if !spark_data.is_empty() && chunks[2].width > 0 && chunks[2].height > 0 {
                 let spark_color = app
                     .dash_cpu_history
@@ -2143,8 +2143,7 @@ fn render_dashboard(
                     .map(|s| color_for_pct(*s as f64))
                     .unwrap_or(cpu_pct_color);
                 let spark_width = chunks[2].width.min(spark_data.len() as u16);
-                let spark_x =
-                    chunks[2].x + (chunks[2].width.saturating_sub(spark_width)) / 2;
+                let spark_x = chunks[2].x + (chunks[2].width.saturating_sub(spark_width)) / 2;
                 let spark_area = Rect {
                     x: spark_x,
                     y: chunks[2].y,
