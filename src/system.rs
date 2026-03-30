@@ -268,7 +268,7 @@ pub fn disks_table_filtered(disks: &Disks, limit: usize, show_all: bool) -> Vec<
 // ── Disk I/O rates ────────────────────────────────────────────────────────────
 
 pub fn update_disk_io_rates(
-    rows: &mut Vec<DiskRow>,
+    rows: &mut [DiskRow],
     prev_stats: &mut HashMap<String, (u64, u64)>,
     elapsed_secs: f64,
 ) {
