@@ -12,7 +12,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;

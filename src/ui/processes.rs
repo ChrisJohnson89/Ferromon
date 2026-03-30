@@ -1,17 +1,22 @@
 use std::cmp::Reverse;
 
 use ratatui::layout::{Constraint, Rect};
+use ratatui::prelude::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
-use ratatui::prelude::Alignment;
 use sysinfo::System;
 
 use crate::services::filtered_proc_rows;
 use crate::types::{AppState, ProcRow, ProcSort};
 use crate::utils::{centered_rect, format_bytes, trim_to};
 
-pub fn render_processes(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState, system: &System) {
+pub fn render_processes(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &mut AppState,
+    system: &System,
+) {
     let mut procs: Vec<ProcRow> = system
         .processes()
         .iter()
