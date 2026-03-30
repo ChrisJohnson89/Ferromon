@@ -14,7 +14,9 @@ use crate::services::{
     refresh_logs, refresh_services,
 };
 use crate::system::{format_snapshot, refresh, snapshot, update_disk_io_rates};
-use crate::types::{AppState, DiskTarget, LogSeverity, LogUnitFilter, ProcRow, ProcSort, Screen, ServiceFilter};
+use crate::types::{
+    AppState, DiskTarget, LogSeverity, LogUnitFilter, ProcRow, ProcSort, Screen, ServiceFilter,
+};
 use crate::ui::{
     render_dashboard, render_disk_dive, render_footer, render_header, render_help, render_logs,
     render_processes, render_services, render_too_small,
@@ -337,7 +339,8 @@ pub fn run_app(
                             if procs.len() > 200 {
                                 procs.truncate(200);
                             }
-                            let procs = crate::services::filtered_proc_rows(procs, &app.proc_search);
+                            let procs =
+                                crate::services::filtered_proc_rows(procs, &app.proc_search);
                             let idx = (app.proc_scroll as usize).min(procs.len().saturating_sub(1));
                             if let Some(row) = procs.get(idx) {
                                 app.proc_kill_confirm = Some((row.pid, row.name.clone()));

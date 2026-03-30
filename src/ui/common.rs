@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::prelude::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
-use ratatui::prelude::Alignment;
 
 use crate::types::{AppState, Screen};
 use crate::utils::color_for_pct;
