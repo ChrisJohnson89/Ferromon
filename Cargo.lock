@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "ferromon"
-version = "2026.3.25"
+version = "2026.3.31"
 dependencies = [
  "crossterm",
  "flate2",
