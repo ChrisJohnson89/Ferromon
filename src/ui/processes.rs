@@ -270,10 +270,7 @@ pub fn render_processes(
             ]),
             Line::from(vec![
                 Span::styled("  exe: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    trim_to(&exe_str, 46),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(trim_to(&exe_str, 46), Style::default().fg(Color::DarkGray)),
             ]),
             Line::from(""),
             Line::from(vec![

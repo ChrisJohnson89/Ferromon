@@ -12,7 +12,10 @@ use crate::utils::color_for_pct;
 pub fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
         Screen::Dashboard => ("Dashboard", "p: processes  d: disk  v: services  l: logs"),
-        Screen::Processes => ("Processes", "Tab: CPU/Mem/Swap  k: kill  R: restart  Esc: back"),
+        Screen::Processes => (
+            "Processes",
+            "Tab: CPU/Mem/Swap  k: kill  R: restart  Esc: back",
+        ),
         Screen::DiskDive => ("Disk dive", "s: scan  Enter: open dir  ←: up  Tab: target"),
         Screen::Services => (
             "Services",
