@@ -12,7 +12,7 @@ use crate::utils::color_for_pct;
 pub fn render_header(app: &AppState) -> Paragraph<'static> {
     let (screen_name, screen_hint) = match app.screen {
         Screen::Dashboard => ("Dashboard", "p: processes  d: disk  v: services  l: logs"),
-        Screen::Processes => ("Processes", "Tab: sort CPU/Mem  Esc: back"),
+        Screen::Processes => ("Processes", "Tab: CPU/Mem/Swap  k: kill  R: restart  Esc: back"),
         Screen::DiskDive => ("Disk dive", "s: scan  Enter: open dir  ←: up  Tab: target"),
         Screen::Services => (
             "Services",
@@ -56,7 +56,12 @@ pub fn render_footer(app: &AppState) -> Paragraph<'static> {
         "Esc: back to dashboard",
     ];
 
-    let tips_processes = ["Tab: sort CPU ↔ Mem", "↑/↓: scroll · k: kill", "Esc: back"];
+    let tips_processes = [
+        "Tab: sort CPU → Mem → Swap → CPU",
+        "↑/↓: scroll · k: kill · R: restart",
+        "Swap column: Linux only (0 on macOS)",
+        "Esc: back",
+    ];
 
     let tips_disk = [
         "s: scan (on-demand)",
@@ -141,9 +146,11 @@ pub fn render_help(app: &AppState) -> Paragraph<'static> {
         }
         Screen::Processes => {
             lines.push(Line::from("Processes:"));
-            lines.push(Line::from("  Tab — toggle CPU/Mem list"));
+            lines.push(Line::from("  Tab — cycle CPU / Mem / Swap sort"));
             lines.push(Line::from("  ↑/↓ — scroll · / — search"));
             lines.push(Line::from("  k — kill selected (y=SIGTERM, K=SIGKILL)"));
+            lines.push(Line::from("  R — restart selected (SIGTERM then respawn)"));
+            lines.push(Line::from("  Swap column: Linux only (macOS shows 0 B)"));
         }
         Screen::DiskDive => {
             lines.push(Line::from("Disk dive:"));

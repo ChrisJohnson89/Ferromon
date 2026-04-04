@@ -3,6 +3,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+// proc_pid_rusage gives per-process phys_footprint (compressed included)
+// without requiring task_for_pid or any special entitlements.
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+extern "C" {
+    fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u8) -> i32;
+}
+
 use sysinfo::{Process, System};
 
 // ── Screen navigation ────────────────────────────────────────────────────────
@@ -24,6 +32,7 @@ pub enum ProcSort {
     #[default]
     Cpu,
     Mem,
+    Swap,
 }
 
 // ── Disk dive targets ────────────────────────────────────────────────────────
@@ -212,12 +221,88 @@ pub struct VmSnapshot {
 
 // ── Process row ──────────────────────────────────────────────────────────────
 
+fn proc_status_label(s: sysinfo::ProcessStatus) -> &'static str {
+    match s {
+        sysinfo::ProcessStatus::Run => "Run",
+        sysinfo::ProcessStatus::Sleep => "Sleep",
+        sysinfo::ProcessStatus::Idle => "Idle",
+        sysinfo::ProcessStatus::Stop => "Stop",
+        sysinfo::ProcessStatus::Zombie => "Zombie",
+        sysinfo::ProcessStatus::Dead => "Dead",
+        sysinfo::ProcessStatus::Tracing => "Trace",
+        _ => "?",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProcRow {
     pub pid: i32,
     pub name: String,
     pub cpu_x10: i32,
     pub mem_bytes: u64,
+    pub swap_bytes: u64,
+    pub status: &'static str,
+}
+
+fn read_proc_swap_bytes(pid: u32) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+        if let Ok(content) = fs::read_to_string(format!("/proc/{}/status", pid)) {
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("VmSwap:") {
+                    let kb: u64 = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    return kb * 1024;
+                }
+            }
+        }
+        0
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // proc_pid_rusage works without task_for_pid / special entitlements.
+        // ri_phys_footprint (physical footprint incl. compressed pages) minus
+        // ri_resident_size (pages physically in RAM) gives the compressed delta —
+        // the macOS equivalent of per-process swap.
+        use std::mem;
+
+        // rusage_info_v2 layout up through ri_phys_footprint (flavor = 2).
+        #[repr(C)]
+        struct RusageInfoV2 {
+            ri_uuid: [u8; 16],
+            ri_user_time: u64,
+            ri_system_time: u64,
+            ri_pkg_idle_wkups: u64,
+            ri_interrupt_wkups: u64,
+            ri_pageins: u64,
+            ri_wired_size: u64,
+            ri_resident_size: u64,
+            ri_phys_footprint: u64,
+        }
+
+        unsafe {
+            let mut info: RusageInfoV2 = mem::zeroed();
+            let ret = proc_pid_rusage(
+                pid as i32,
+                2, // RUSAGE_INFO_V2
+                &mut info as *mut RusageInfoV2 as *mut u8,
+            );
+            if ret == 0 {
+                info.ri_phys_footprint.saturating_sub(info.ri_resident_size)
+            } else {
+                0
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        0
+    }
 }
 
 impl ProcRow {
@@ -230,6 +315,8 @@ impl ProcRow {
             name: p.name().to_string(),
             cpu_x10,
             mem_bytes,
+            swap_bytes: read_proc_swap_bytes(pid.as_u32()),
+            status: proc_status_label(p.status()),
         }
     }
 }
@@ -265,6 +352,7 @@ pub struct AppState {
     pub proc_search: String,
     pub proc_search_active: bool,
     pub proc_kill_confirm: Option<(i32, String)>,
+    pub proc_restart_confirm: Option<(i32, String, std::path::PathBuf, Vec<String>)>,
 
     pub disk_target: DiskTarget,
     pub disk_scroll: u16,
@@ -316,6 +404,7 @@ impl Default for AppState {
             proc_search: String::new(),
             proc_search_active: false,
             proc_kill_confirm: None,
+            proc_restart_confirm: None,
             disk_target: DiskTarget::default(),
             disk_scroll: 0,
             disk_scan: DiskScan::default(),

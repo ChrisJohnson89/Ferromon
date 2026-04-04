@@ -67,6 +67,7 @@ pub fn format_top_processes(system: &System, sort: ProcSort, count: usize) -> Ve
     match sort {
         ProcSort::Cpu => procs.sort_by_key(|p| Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))),
         ProcSort::Mem => procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))),
+        ProcSort::Swap => procs.sort_by_key(|p| Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))),
     }
 
     procs

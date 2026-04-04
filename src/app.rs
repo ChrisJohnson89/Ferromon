@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::io;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -184,6 +185,25 @@ pub fn run_app(
                     continue;
                 }
 
+                // Restart confirm mode intercepts all keys.
+                if app.proc_restart_confirm.is_some() {
+                    let (pid, _, exe, args) = app.proc_restart_confirm.clone().unwrap();
+                    match key.code {
+                        KeyCode::Char('y') => {
+                            if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid as u32)) {
+                                let _ = proc.kill_with(sysinfo::Signal::Term);
+                            }
+                            let _ = Command::new(&exe).args(&args).spawn();
+                            app.proc_restart_confirm = None;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            app.proc_restart_confirm = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 if handle_proc_search_key(app, &key) {
                     continue;
                 }
@@ -298,7 +318,8 @@ pub fn run_app(
                         } else if matches!(app.screen, Screen::Processes) {
                             app.proc_sort = match app.proc_sort {
                                 ProcSort::Cpu => ProcSort::Mem,
-                                ProcSort::Mem => ProcSort::Cpu,
+                                ProcSort::Mem => ProcSort::Swap,
+                                ProcSort::Swap => ProcSort::Cpu,
                             };
                             app.proc_scroll = 0;
                         } else if matches!(app.screen, Screen::Services) {
@@ -335,6 +356,9 @@ pub fn run_app(
                                 ProcSort::Mem => procs.sort_by_key(|p| {
                                     Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))
                                 }),
+                                ProcSort::Swap => procs.sort_by_key(|p| {
+                                    Reverse((p.swap_bytes as i64, p.mem_bytes as i64))
+                                }),
                             }
                             if procs.len() > 200 {
                                 procs.truncate(200);
@@ -344,6 +368,44 @@ pub fn run_app(
                             let idx = (app.proc_scroll as usize).min(procs.len().saturating_sub(1));
                             if let Some(row) = procs.get(idx) {
                                 app.proc_kill_confirm = Some((row.pid, row.name.clone()));
+                            }
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        if matches!(app.screen, Screen::Processes) && !app.proc_search_active {
+                            let mut procs: Vec<ProcRow> = system
+                                .processes()
+                                .iter()
+                                .map(|(pid, p)| ProcRow::from_process(*pid, p))
+                                .collect();
+                            match app.proc_sort {
+                                ProcSort::Cpu => procs.sort_by_key(|p| {
+                                    Reverse((p.cpu_x10 as i64, p.mem_bytes as i64))
+                                }),
+                                ProcSort::Mem => procs.sort_by_key(|p| {
+                                    Reverse((p.mem_bytes as i64, p.cpu_x10 as i64))
+                                }),
+                                ProcSort::Swap => procs.sort_by_key(|p| {
+                                    Reverse((p.swap_bytes as i64, p.mem_bytes as i64))
+                                }),
+                            }
+                            if procs.len() > 200 {
+                                procs.truncate(200);
+                            }
+                            let procs =
+                                crate::services::filtered_proc_rows(procs, &app.proc_search);
+                            let idx = (app.proc_scroll as usize).min(procs.len().saturating_sub(1));
+                            if let Some(row) = procs.get(idx) {
+                                let sysinfo_pid = sysinfo::Pid::from_u32(row.pid as u32);
+                                if let Some(proc) = system.process(sysinfo_pid) {
+                                    if let Some(exe_path) = proc.exe() {
+                                        let exe = exe_path.to_path_buf();
+                                        let args: Vec<String> =
+                                            proc.cmd().iter().skip(1).cloned().collect();
+                                        app.proc_restart_confirm =
+                                            Some((row.pid, row.name.clone(), exe, args));
+                                    }
+                                }
                             }
                         }
                     }
