@@ -114,7 +114,7 @@ pub fn render_footer(app: &AppState) -> Paragraph<'static> {
         ),
     };
 
-    Paragraph::new(Line::from(vec![
+    let tip_line = Line::from(vec![
         Span::styled(
             format!("{label}: "),
             Style::default()
@@ -122,7 +122,33 @@ pub fn render_footer(app: &AppState) -> Paragraph<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(tip),
-    ]))
+    ]);
+
+    if app.update.available {
+        let tag = app
+            .update
+            .latest_tag
+            .clone()
+            .unwrap_or_else(|| "new".to_string());
+        let update_line = Line::from(vec![
+            Span::styled(
+                "Update available ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(tag, Style::default().fg(Color::Green)),
+            Span::styled(
+                "  —  press ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled("[u]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" on Dashboard to install", Style::default().fg(Color::Yellow)),
+        ]);
+        Paragraph::new(vec![update_line, tip_line])
+    } else {
+        Paragraph::new(tip_line)
+    }
 }
 
 pub fn render_help(app: &AppState) -> Paragraph<'static> {

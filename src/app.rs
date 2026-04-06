@@ -104,7 +104,13 @@ pub fn run_app(
                 .constraints([
                     Constraint::Length(1),
                     Constraint::Min(8),
-                    Constraint::Length(if app.show_help { 7 } else { 1 }),
+                    Constraint::Length(if app.show_help {
+                        7
+                    } else if app.update.available {
+                        2
+                    } else {
+                        1
+                    }),
                 ])
                 .margin(1)
                 .split(size);
