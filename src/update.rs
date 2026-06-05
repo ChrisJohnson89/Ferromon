@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use flate2::read::GzDecoder;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tar::Archive;
 
 use crate::types::UpdateState;
@@ -250,8 +251,15 @@ pub fn perform_self_update(latest_tag: &str) -> Result<String, String> {
         .ok_or_else(|| "bad sha file".to_string())
         .map(|s| s.to_string())?;
 
-    if expected.len() < 16 {
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("checksum looked wrong".to_string());
+    }
+
+    let actual = format!("{:x}", Sha256::digest(&tar_gz));
+    if actual != expected.to_ascii_lowercase() {
+        return Err(format!(
+            "checksum mismatch (expected {expected}, got {actual})"
+        ));
     }
 
     // Extract `ferro` from tar.gz

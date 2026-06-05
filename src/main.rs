@@ -9,13 +9,15 @@ mod update;
 mod utils;
 
 use std::io;
+use std::process;
 use std::time::{Duration, Instant};
 
+use crossterm::cursor::Show;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use sysinfo::{Disks, ProcessRefreshKind, RefreshKind, System};
@@ -26,8 +28,59 @@ use system::refresh;
 use types::AppState;
 use update::{check_update, load_update_cache, VERSION};
 
-fn main() -> io::Result<()> {
-    let args = parse_args();
+struct TerminalGuard {
+    mouse_enabled: bool,
+    active: bool,
+}
+
+impl TerminalGuard {
+    fn enter(mouse_enabled: bool) -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        let guard = Self {
+            mouse_enabled,
+            active: true,
+        };
+        if mouse_enabled {
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        } else {
+            execute!(stdout, EnterAlternateScreen)?;
+        }
+        Ok(guard)
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        let raw_result = disable_raw_mode();
+        let screen_result = if self.mouse_enabled {
+            execute!(stdout, LeaveAlternateScreen, DisableMouseCapture, Show)
+        } else {
+            execute!(stdout, LeaveAlternateScreen, Show)
+        };
+        self.active = false;
+        raw_result?;
+        screen_result
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("ferro: {e}");
+        process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let args = parse_args()?;
     if args.show_version {
         println!("{VERSION}");
         return Ok(());
@@ -37,18 +90,11 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    // Terminal setup
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    if args.no_mouse {
-        execute!(stdout, EnterAlternateScreen)?;
-    } else {
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    }
-    terminal::enable_raw_mode()?;
+    let mut guard = TerminalGuard::enter(!args.no_mouse).map_err(|e| e.to_string())?;
 
+    let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
     // Keep dashboard refresh light, but allow process refresh when needed.
     let refresh_kind = RefreshKind::new()
@@ -78,20 +124,10 @@ fn main() -> io::Result<()> {
         &mut app,
         tick_rate,
         &mut last_tick,
-    );
+    )
+    .map_err(|e| e.to_string());
 
-    // Always restore terminal
-    disable_raw_mode()?;
-    if args.no_mouse {
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-    }
-    terminal.show_cursor()?;
+    guard.restore().map_err(|e| e.to_string())?;
 
     if let Ok(Some(txt)) = &out {
         println!("{txt}");

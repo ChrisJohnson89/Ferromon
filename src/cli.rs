@@ -1,7 +1,7 @@
 use crate::types::Args;
 use crate::update::VERSION;
 
-pub fn parse_args() -> Args {
+pub fn parse_args() -> Result<Args, String> {
     let mut tick_ms: u64 = 500;
     let mut no_mouse = false;
     let mut show_help = false;
@@ -16,24 +16,29 @@ pub fn parse_args() -> Args {
             "--version" | "-V" => show_version = true,
             "--no-mouse" => no_mouse = true,
             "--tick-ms" => {
-                if let Some(val) = argv.get(i + 1) {
-                    if let Ok(ms) = val.parse::<u64>() {
-                        tick_ms = ms.clamp(50, 5000);
-                    }
-                    i += 1;
-                }
+                let Some(val) = argv.get(i + 1) else {
+                    return Err("--tick-ms requires a value".to_string());
+                };
+                let ms = val
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --tick-ms value: {val}"))?;
+                tick_ms = ms.clamp(50, 5000);
+                i += 1;
+            }
+            _ if a.starts_with('-') => {
+                return Err(format!("unknown option: {a}"));
             }
             _ => {}
         }
         i += 1;
     }
 
-    Args {
+    Ok(Args {
         tick_ms,
         no_mouse,
         show_help,
         show_version,
-    }
+    })
 }
 
 pub fn print_cli_help() {

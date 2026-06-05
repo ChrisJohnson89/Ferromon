@@ -99,10 +99,11 @@ elif command -v sudo >/dev/null 2>&1; then
   say "✓ Installed to $DEST (via sudo)"
 else
   install_to_user
+  DEST="$HOME/.local/bin/$BIN_NAME"
 fi
 
 say "→ Done: $BIN_NAME $VER ($TARGET)"
-INSTALLED_VER="$($BIN_NAME --version 2>/dev/null || true)"
+INSTALLED_VER="$("$DEST" --version 2>/dev/null || true)"
 if [ -n "$INSTALLED_VER" ]; then
   say "→ Installed version: $INSTALLED_VER"
 fi
